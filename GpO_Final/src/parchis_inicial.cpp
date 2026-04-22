@@ -552,7 +552,7 @@ objeto crear_casillas_desde_grafo(float size, float z) {
 
         if (c.tipo == SEGURO) { r = g = b = 0.7f; }
         if (c.tipo == SALIDA) { r = 1.0f; g = 1.0f; b = 1.0f; }
-        if (c.tipo == META || c.tipo == FINAL) {
+        if (c.tipo == META || c.tipo == FINAL || c.tipo == CASA) {
             if (c.color == ROJO)     { r=0.65f; g=0.15f; b=0.15f; }
             if (c.color == AZUL)     { r=0.15f; g=0.15f; b=0.70f; }
             if (c.color == VERDE)    { r=0.15f; g=0.60f; b=0.15f; }
@@ -651,7 +651,7 @@ void configurar_camino_principal() {
     grafo[50].tipo = SEGURO;
     grafo[55].tipo = SEGURO;
     grafo[62].tipo = SEGURO;  
-    grafo[67].tipo = SEGURO; 
+    grafo[67].tipo = SEGURO;
 }
 struct InfoColor {
     ColorJugador color;
@@ -661,10 +661,10 @@ struct InfoColor {
 
 void configurar_metas() {
     InfoColor info[4] = {
-        { VERDE,     5,  68 }, // 68..75
-        { ROJO,     22,  76 }, // 76..83
-        { AZUL,     39,  84 }, // 84..91
-        { AMARILLO, 56,  92 }  // 92..99
+        { AMARILLO,  4,  68 }, // 68..75
+        { AZUL,     21,  76 }, // 76..83
+        { ROJO,     38,  84 }, // 84..91
+        { VERDE,    55,  92 }  // 92..99
     };
 
     for (int c = 0; c < 4; ++c) {
@@ -685,24 +685,23 @@ void configurar_metas() {
     }
 }
 void configurar_casas() {
-    int base_rojo     = 100;
+    int base_amarillo = 100;
     int base_azul     = 104;
-    int base_verde    = 108;
-    int base_amarillo = 112;
-
+    int base_rojo     = 108;
+    int base_verde    = 112;
 
     for (int i = 0; i < 4; ++i) {
-        grafo[base_rojo + i].tipo  = CASA;
-        grafo[base_rojo + i].color = ROJO;
+        grafo[base_amarillo + i].tipo  = CASA;
+        grafo[base_amarillo + i].color = AMARILLO;
 
         grafo[base_azul + i].tipo  = CASA;
         grafo[base_azul + i].color = AZUL;
 
+        grafo[base_rojo + i].tipo  = CASA;
+        grafo[base_rojo + i].color = ROJO;
+
         grafo[base_verde + i].tipo  = CASA;
         grafo[base_verde + i].color = VERDE;
-
-        grafo[base_amarillo + i].tipo  = CASA;
-        grafo[base_amarillo + i].color = AMARILLO;
     }
 }
 void asignar_posiciones_camino_principal() {
@@ -753,38 +752,38 @@ void asignar_posiciones_camino_principal() {
 void asignar_posiciones_metas() {
     float step = 0.08f;
 
-    // VERDE (abajo → centro)  id = 68..75
+    // AMARILLO (derecha → centro)  id = 68..75
     for (int k = 0; k < 8; ++k) {
         int id = 68 + k;
-        grafo[id].x = 0.0f;
-        grafo[id].y = -0.90f + step * (k + 1);
-    }
-
-    // ROJO (izquierda → centro) id = 76..83
-    for (int k = 0; k < 8; ++k) {
-        int id = 76 + k;
-        grafo[id].x = -0.90f + step * (k + 1);
+        grafo[id].x = 0.90f - step * (k + 1);
         grafo[id].y = 0.0f;
     }
 
-    // AZUL (arriba → centro) id = 84..91
+    // AZUL (arriba → centro) id = 76..83
     for (int k = 0; k < 8; ++k) {
-        int id = 84 + k;
+        int id = 76 + k;
         grafo[id].x = 0.0f;
         grafo[id].y = 0.90f - step * (k + 1);
     }
 
-    // AMARILLO (derecha → centro) id = 92..99
+    // ROJO (izquierda → centro) id = 84..91
+    for (int k = 0; k < 8; ++k) {
+        int id = 84 + k;
+        grafo[id].x = -0.90f + step * (k + 1);
+        grafo[id].y = 0.0f;
+    }
+
+    // VERDE (abajo → centro) id = 92..99
     for (int k = 0; k < 8; ++k) {
         int id = 92 + k;
-        grafo[id].x = 0.90f - step * (k + 1);
-        grafo[id].y = 0.0f;
+        grafo[id].x = 0.0f;
+        grafo[id].y = -0.90f + step * (k + 1);
     }
 }
 
 void asignar_posiciones_casas() {
-    float d = 0.6f;
-    float s = 0.08f;
+    float d = 0.6f; //distancia desde el centro del tablero hasta el centro de cada base
+    float s = 0.08f; //separacion entre casillas
 
     auto set = [&](int base, float cx, float cy) {
         grafo[base+0].x = cx-s; grafo[base+0].y = cy-s;
@@ -793,10 +792,10 @@ void asignar_posiciones_casas() {
         grafo[base+3].x = cx+s; grafo[base+3].y = cy+s;
     };
 
-    set(100, -d,  d);   // ROJO
-    set(104,  d,  d);   // AZUL
-    set(108, -d, -d);   // VERDE
-    set(112,  d, -d);   // AMARILLO
+    set(100,  d,  d);   // arriba drcha
+    set(104, -d,  d);   // arriba izda
+    set(108, -d, -d);   // abajo izda
+    set(112,  d, -d);   // abajo drcha
 
 }
 void construir_grafo_y_posiciones() {
