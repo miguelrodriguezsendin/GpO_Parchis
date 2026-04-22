@@ -1,5 +1,5 @@
 # Graficos por ordenador
-El proyecto completo está en otro repo, hacer git clone --recursive https://github.com/juanpebm/gpo-framework.git
+El proyecto completo está en otro repo, hacer git clone --recursive https://github.com/juanpebm/gpo-framework.git \n
 Borrar todas las clases dentro de src menos GPO_aux.cpp
 Quitarlo también de CMakeLists.txt
 Crear clase parchis_inicial.cpp y copiar el contenido de este repo, ademas de añadirlo a CMakeLists.txt
