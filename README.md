@@ -6,6 +6,7 @@ Modificar CMakeLists.txt y GPO-FRAMEWORK>.vscode>c_cpp_properties.json
 Importar en bin>data todos los archivos necesarios
 
 Crear clase parchis_inicial.cpp, Modelo3D.cpp, Modelo3D.h, starwars.cpp y copiar el contenido de este repo
+incluir como primera linea de include>GpO.h : #pragma once
 Ejecutar los comandos:
 - Para construir el proyecto: cmake -DCMAKE_POLICY_VERSION_MINIMUM="3.5" ..
 - Para compilar: cmake --build . --config Debug

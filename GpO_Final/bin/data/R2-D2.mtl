@@ -1,0 +1,14 @@
+# Blender 5.1.1 MTL File: 'R2-D2.blend'
+# www.blender.org
+
+newmtl R2D2
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 0.000000
+Ks 0.500000 0.500000 0.500000
+Ni 1.450000
+d 1.000000
+illum 2
+map_Kd C:/Users/migue/AppData/Local/Temp/Texturing/Export/model_R2D2_BaseColor.png
+map_Ns C:/Users/migue/AppData/Local/Temp/Texturing/Export/model_R2D2_Roughness.png
+map_refl C:/Users/migue/AppData/Local/Temp/Texturing/Export/model_R2D2_Metallic.png
+map_Ke C:/Users/migue/AppData/Local/Temp/Texturing/Export/model_R2D2_Emissive.png
