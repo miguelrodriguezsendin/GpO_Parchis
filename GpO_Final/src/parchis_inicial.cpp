@@ -14,6 +14,11 @@ Modelo3D* nave = nullptr;
 Modelo3D* TieInterceptor = nullptr;
 Modelo3D* R2D2 = nullptr;
 Modelo3D* Mask = nullptr;
+Modelo3D* CloneTurret = nullptr;
+Modelo3D* StormT = nullptr;
+Modelo3D* building = nullptr;
+Modelo3D* LightSaber = nullptr;
+Modelo3D* Falcon = nullptr;
 
 GLFWwindow* window;
 GLuint prog;
@@ -78,7 +83,7 @@ struct Ficha {
 };
 
 Ficha fichas[16];          // 4 fichas amarillas de momento
-int ficha_seleccionada = 0;
+int ficha_seleccionada = -1;
 float tiempo_ultimo_movimiento = 0.0f;
 float intervalo_movimiento = 1.0f;
 
@@ -88,6 +93,10 @@ int dado = 0;          // resultado del dado
 bool dado_lanzado = false;
 
 double tiempo_anterior = 0.0;
+double tiempo_dado = 0.0;
+std::string mensaje_gui = "";
+double tiempo_mensaje = 0.0;
+double duracion_mensaje = 2.0;
 
 // ======================= SHADERS =========================
 
@@ -681,11 +690,15 @@ void configurar_camino_principal() {
     grafo[55].tipo = SEGURO;
     grafo[62].tipo = SEGURO;  
     grafo[67].tipo = SEGURO;
+    grafo[0].tipo  = SALIDA;   // salida AMARILLO
+    grafo[17].tipo = SALIDA;   // salida AZUL  
+    grafo[34].tipo = SALIDA;   // salida ROJO
+    grafo[51].tipo = SALIDA;   // salida VERDE
 }
 struct InfoColor {
     ColorJugador color;
     int casilla_entrada_meta;   // índice en 0..67
-    int primera_meta;           // índice en 68..91
+    int primera_meta;           // índice en 68..99
 };
 
 void configurar_metas() {
@@ -840,18 +853,94 @@ void construir_grafo_y_posiciones() {
 }
 
 
+int get_offset_ficha(int ficha_idx, float& ox, float& oy) {
+    int casilla = fichas[ficha_idx].casilla_actual;
+    ColorJugador color = fichas[ficha_idx].color;
+    int count = 0;
+    int orden = 0;
+    for (int j = 0; j < 16; j++) {
+        if (fichas[j].casilla_actual == casilla) {
+            if (j == ficha_idx) orden = count;
+            count++;
+        }
+    }
+
+    ox = 0.0f; oy = 0.0f;
+    if (count < 2) return count;
+
+    // offsets según orden: 0 y 1 en -d/+d, 2 y 3 en -d/+d pero en el otro eje
+    float d = 0.04f;
+
+    // determinar si el desplazamiento principal es en Y o en X
+    bool usar_oy =
+        (casilla >=  0 && casilla <=  7) ||
+        (casilla >= 25 && casilla <= 41) ||
+        (casilla >= 59 && casilla <= 75) ||
+        (casilla >= 84 && casilla <= 91);
+
+    bool usar_ox =
+        (casilla >=  8 && casilla <= 24) ||
+        (casilla >= 42 && casilla <= 58) ||
+        (casilla >= 76 && casilla <= 83) ||
+        (casilla >= 92 && casilla <= 99);
+
+    if (!usar_oy && !usar_ox) usar_ox = true;  // casas y esquinas → X por defecto
+
+    if (count == 2) {
+        float val = (orden == 0) ? -d : d;
+        if (usar_oy) oy = val;
+        else         ox = val;
+    }
+    else if (count == 3 || count == 4) {
+        // fichas 0 y 1 → -d y +d en eje principal
+        // fichas 2 y 3 → -d y +d en eje principal pero desplazados hacia un eje secundario o al otro
+        if (orden == 0) { if (usar_oy) oy = -d; else ox = -d; }
+        if (orden == 1) { if (usar_oy) oy =  d; else ox =  d; }
+        if (orden == 2) { if (usar_oy){oy = -d; if(color == AMARILLO) ox = -d*2; else ox = d*2;} 
+                          else{ox =  -d; if(color == AZUL) oy = -d*2; else oy = d*2;} }
+        if (orden == 3) { if (usar_oy){oy = d; if(color == AMARILLO) ox = -d*2; else ox = d*2;} 
+                          else{ox =  d; if(color == AZUL) oy = -d*2; else oy = d*2;} }
+    }
+
+    return count;
+}
+
+// cuenta fichas en una casilla
+int fichas_en_casilla(int casilla) {
+    int count = 0;
+    for (int j = 0; j < 16; j++)
+        if (fichas[j].casilla_actual == casilla) count++;
+    return count;
+}
+bool comprobar_victoria(ColorJugador color) {
+    int base_meta;
+    switch (color) {
+        case AMARILLO: base_meta = 68; break;
+        case AZUL:     base_meta = 76; break;
+        case ROJO:     base_meta = 84; break;
+        case VERDE:    base_meta = 92; break;
+        default: return false;
+    }
+    // la casilla final es la última de cada meta (base_meta + 7)
+    int casilla_final = base_meta + 7;
+    int count = 0;
+    for (int j = 0; j < 16; j++)
+        if (fichas[j].color == color && fichas[j].casilla_actual == casilla_final)
+            count++;
+    return count >= 4;
+}
 void mover_ficha(Ficha& f, int pasos) {
     for (int p = 0; p < pasos; p++) {
         int actual = f.casilla_actual;
         int siguiente = -1;
 
         if (actual >= 100) {
-            if (pasos != 5) break;  // en parchís real solo sales con un 5
+            if (pasos != 5) break;
             if (f.color == AMARILLO) siguiente = 0;
             else if (f.color == AZUL)  siguiente = 17;
             else if (f.color == ROJO)  siguiente = 34;
             else if (f.color == VERDE) siguiente = 51;
-        } else if (!f.en_meta && grafo[actual].next_meta != -1 
+        } else if (!f.en_meta && grafo[actual].next_meta != -1
                    && f.color == grafo[actual].color) {
             siguiente = grafo[actual].next_meta;
             f.en_meta = true;
@@ -860,8 +949,21 @@ void mover_ficha(Ficha& f, int pasos) {
         }
 
         if (siguiente == -1) break;
+
+        // ── bloqueo enemigo (2+ fichas enemigas) ──
+        if (siguiente < 100) {
+            int count_enemigo = 0;
+            for (int j = 0; j < 16; j++)
+                if (fichas[j].casilla_actual == siguiente && fichas[j].color != f.color)
+                    count_enemigo++;
+            if (count_enemigo >= 2) break;
+        }
         f.casilla_actual = siguiente;
     }
+}
+void mostrar_mensaje(const std::string& msg) {
+    mensaje_gui = msg;
+    tiempo_mensaje = glfwGetTime();
 }
 
 // ======================= INIT SCENE =========================
@@ -879,6 +981,11 @@ void init_scene() {
     TieInterceptor = new Modelo3D("../data/TieInterceptor.obj"); 
     R2D2 = new Modelo3D("../data/R2-D2.obj");  
     Mask = new Modelo3D("../data/Mask.obj");  
+    CloneTurret = new Modelo3D("../data/CloneTurret.obj");
+    StormT = new Modelo3D("../data/StormT.obj");
+    building = new Modelo3D("../data/building.obj");
+    LightSaber = new Modelo3D("../data/LightSaberConcept.obj");
+    Falcon = new Modelo3D("../data/Falcon.obj");
 
 //logica
     construir_grafo_y_posiciones();
@@ -960,7 +1067,7 @@ void render_scene() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-    // ── 2. TODA la UI junta aquí ──
+        // ── 2. TODA la UI junta aquí ──
     ImVec4 colores[4] = {
         ImVec4(0.9f, 0.2f, 0.2f, 1.0f),  // ROJO
         ImVec4(0.2f, 0.2f, 0.9f, 1.0f),  // AZUL
@@ -968,17 +1075,120 @@ void render_scene() {
         ImVec4(0.9f, 0.9f, 0.2f, 1.0f),  // AMARILLO
     };
     const char* nombres[4] = { "Rojo", "Azul", "Verde", "Amarillo" };
+    
+    ImGui::SetNextWindowPos(ImVec2(ANCHO * 0.5f, 10), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::Begin("##turno", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
     ColorJugador color_actual = orden_turnos[turno_actual];
 
-    ImGui::SetNextWindowPos(ImVec2(10, 10));
-    ImGui::SetNextWindowSize(ImVec2(200, 80));
-    ImGui::Begin("##turno", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
+    float escala = ANCHO / 800.0f; 
+    ImGui::SetWindowFontScale(escala * 1.5f);
     ImGui::TextColored(colores[color_actual], "Turno: %s", nombres[color_actual]);
     if (dado_lanzado)
         ImGui::Text("Dado: %d", dado);
     else
         ImGui::Text("Pulsa ESPACIO para tirar");
     ImGui::End();
+
+    // Ventana de instrucciones — esquina inferior izquierda
+    ImGui::SetNextWindowPos(ImVec2(10, ALTO - 120 * escala));
+    ImGui::Begin("##instrucciones", nullptr, 
+        ImGuiWindowFlags_NoTitleBar | 
+        ImGuiWindowFlags_NoResize | 
+        ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoBackground);  // sin fondo para que sea más limpio
+
+    ImGui::SetWindowFontScale(escala);
+
+    if (!dado_lanzado) {
+        ImGui::TextColored(ImVec4(1,1,0,1), "ESPACIO");
+        ImGui::SameLine();
+        ImGui::Text("- Tirar dado");
+    } else {
+        ImGui::TextColored(ImVec4(1,1,0,1), "1 2 3 4");
+        ImGui::SameLine();
+        ImGui::Text("- Seleccionar ficha");
+        ImGui::TextColored(ImVec4(1,1,0,1), "ENTER  ");
+        ImGui::SameLine();
+        ImGui::Text("- Mover ficha seleccionada %d posiciones", dado);
+    }
+
+    ImGui::End();
+
+    // ── DADO ──────────────────────────────────────
+    double ahora = glfwGetTime();
+    if (dado_lanzado && (ahora - tiempo_dado) < 2.0) {
+        ImDrawList* draw = ImGui::GetForegroundDrawList();
+        
+        // Color según turno
+        ImU32 color_dado;
+        switch(color_actual) {
+            case ROJO:     color_dado = IM_COL32(220, 50,  50,  255); break;
+            case AZUL:     color_dado = IM_COL32(50,  50,  220, 255); break;
+            case VERDE:    color_dado = IM_COL32(50,  200, 50,  255); break;
+            case AMARILLO: color_dado = IM_COL32(220, 220, 50,  255); break;
+        }
+
+        float cx = ANCHO * 0.5f;
+        float cy = ALTO  * 0.5f;
+        float s  = 80.0f;   // tamaño del dado
+
+        // Cara del dado
+        draw->AddRectFilled(
+            ImVec2(cx - s, cy - s),
+            ImVec2(cx + s, cy + s),
+            color_dado, 16.0f  // radio de esquinas
+        );
+        // Borde
+        draw->AddRect(
+            ImVec2(cx - s, cy - s),
+            ImVec2(cx + s, cy + s),
+            IM_COL32(255,255,255,200), 16.0f, 0, 3.0f
+        );
+
+        // Puntos según valor del dado
+        ImU32 punto_col = IM_COL32(255, 255, 255, 255);
+        float r = 10.0f;  // radio del punto
+        float d = s * 0.55f;  // distancia del centro
+
+        // Posiciones de los 7 posibles puntos
+        ImVec2 pts[7] = {
+            ImVec2(cx - d, cy - d),  // 0: arriba-izda
+            ImVec2(cx + d, cy - d),  // 1: arriba-dcha
+            ImVec2(cx - d, cy),      // 2: medio-izda
+            ImVec2(cx,     cy),      // 3: centro
+            ImVec2(cx + d, cy),      // 4: medio-dcha
+            ImVec2(cx - d, cy + d),  // 5: abajo-izda
+            ImVec2(cx + d, cy + d),  // 6: abajo-dcha
+        };
+
+        // Qué puntos se dibujan para cada valor
+        bool layout[6][7] = {
+            {0,0,0,1,0,0,0},  // 1
+            {1,0,0,0,0,0,1},  // 2
+            {1,0,0,1,0,0,1},  // 3
+            {1,1,0,0,0,1,1},  // 4
+            {1,1,0,1,0,1,1},  // 5
+            {1,1,1,0,1,1,1},  // 6
+        };
+
+        for (int p = 0; p < 7; p++)
+            if (layout[dado-1][p])
+                draw->AddCircleFilled(pts[p], r, punto_col);
+    }
+
+
+    // ── MENSAJE CENTRAL INFERIOR ──────────────────────────
+    double ya = glfwGetTime();
+    if (!mensaje_gui.empty() && (ya - tiempo_mensaje) < duracion_mensaje) {
+        ImGui::SetNextWindowPos(ImVec2(ANCHO * 0.5f, ALTO * 0.88f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::Begin("##mensaje", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav);
+        ImGui::SetWindowFontScale((ANCHO / 800.0f) * 2.0f);
+        ImGui::Text("%s", mensaje_gui.c_str());
+        ImGui::End();
+    }
 
 
 
@@ -1027,7 +1237,53 @@ void render_scene() {
     MHangar = scale(MHangar, vec3(2.0f));  
     Hangar->draw(P, V, MHangar);
 
-    // movimiento automático cada segundo
+
+    mat4 MDeco1 = mat4(1.0f);
+    MDeco1 = translate(MDeco1, vec3( 0.7f,  -0.85f, 0.0f));
+    MDeco1 = rotate(MDeco1, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco1 = rotate(MDeco1, glm::radians(180.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco1 = scale(MDeco1, vec3(0.01f));
+    CloneTurret->draw(P, V, MDeco1);
+//segunda torreta
+    mat4 MDeco1b = mat4(1.0f);
+    MDeco1b = translate(MDeco1b, vec3( 0.85f,  -0.7f, 0.0f));
+    MDeco1b = rotate(MDeco1b, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco1b = rotate(MDeco1b, glm::radians(180.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco1b = rotate(MDeco1b, glm::radians(270.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco1b = scale(MDeco1b, vec3(0.01f));
+    CloneTurret->draw(P, V, MDeco1b);
+
+   /* mat4 MDeco2 = mat4(1.0f);
+    MDeco2 = translate(MDeco2, vec3( 0.0f, -1.6f, 0.0f));
+    MDeco2 = rotate(MDeco2, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco2 = scale(MDeco2, vec3(0.05f));
+    StormT->draw(P, V, MDeco2);*/
+
+    mat4 MDeco3 = mat4(1.0f);
+    MDeco3 = translate(MDeco3, vec3( -0.85f,  0.85f, 0.0f));
+    MDeco3 = rotate(MDeco3, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco3 = scale(MDeco3, vec3(0.007f));
+    building->draw(P, V, MDeco3);
+
+    mat4 MDeco4 = mat4(1.0f);
+    MDeco4 = translate(MDeco4, vec3(-0.85f,  -0.5f, 0.03f));
+    MDeco4 = rotate(MDeco4, glm::radians(76.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco4 = scale(MDeco4, vec3(0.017f));
+    LightSaber->draw(P, V, MDeco4);
+//segundo sable
+    mat4 MDeco4b = mat4(1.0f);
+    MDeco4b = translate(MDeco4b, vec3(-0.5f, -0.85f, -0.02f)); 
+    MDeco4b = rotate(MDeco4b, glm::radians(-76.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco4b = scale(MDeco4b, vec3(0.017f));
+    LightSaber->draw(P, V, MDeco4b);
+
+    mat4 MDeco5 = mat4(1.0f);
+    MDeco5 = translate(MDeco5, vec3( 0.85f,  0.8f, 0.0f));
+    MDeco5 = rotate(MDeco5, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco5 = scale(MDeco5, vec3(0.07f));
+    Falcon->draw(P, V, MDeco5);
+
+    // movimiento automatico cada segundo
     /*double tiempo_actual = glfwGetTime();
     if (tiempo_actual - tiempo_anterior > 0.1) {
         mover_ficha(fichas[0],1);  // mueve solo la ficha 0
@@ -1037,10 +1293,13 @@ void render_scene() {
     // dibujar fichas en su casilla actual
     for (int i = 0; i < 4; i++) { //AMARILLAS
         int idx = fichas[i].casilla_actual;
-        vec3 pos = vec3(grafo[idx].x, grafo[idx].y, 0.05f);
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
+        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
         M = translate(M, pos);
-        M = translate(M, vec3(0.006f, 0.0f, 0.0f));
+        M = translate(M, vec3(-0.005f, -0.005f, 0.0f));
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
         M = rotate(M, glm::radians(-90.0f), vec3(0.0f, 1.0f, 0.0f));
         M = scale(M, vec3(0.025f));
@@ -1048,7 +1307,10 @@ void render_scene() {
     }
     for (int i = 4; i < 8; i++) { //AZULES
         int idx = fichas[i].casilla_actual;
-        vec3 pos = vec3(grafo[idx].x, grafo[idx].y, 0.05f);
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
+        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
         M = translate(M, pos);
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
@@ -1058,7 +1320,10 @@ void render_scene() {
     }
     for (int i = 8; i < 12; i++) { //ROJAS
         int idx = fichas[i].casilla_actual;
-        vec3 pos = vec3(grafo[idx].x, grafo[idx].y, 0.05f);
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
+        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
         M = translate(M, pos);
         M = translate(M, vec3(0.0f, 0.04f, 0.0f));
@@ -1068,7 +1333,10 @@ void render_scene() {
     }
     for (int i = 12; i < 16; i++) { //VERDES
         int idx = fichas[i].casilla_actual;
-        vec3 pos = vec3(grafo[idx].x, grafo[idx].y, 0.01f);
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.11f : 0.01f;
+        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
         M = translate(M, pos);
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
@@ -1076,6 +1344,7 @@ void render_scene() {
         M = scale(M, vec3(0.012f));
         Mask->draw(P, V, M);
     }
+    
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -1119,31 +1388,154 @@ static void KeyCallback(GLFWwindow* window, int key, int code, int action, int m
     if (key == GLFW_KEY_ESCAPE)
         glfwSetWindowShouldClose(window, true);
 
-	if (key == GLFW_KEY_UP && action == GLFW_PRESS)
-		radio -= 0.2f;
-	if (key == GLFW_KEY_DOWN && action == GLFW_PRESS)
-		radio += 0.2f;
-	if (key == GLFW_KEY_W && action == GLFW_PRESS)
-		radio -= 0.2f;
-	if (key == GLFW_KEY_S && action == GLFW_PRESS)
-		radio += 0.2f;
-    
+    if (key == GLFW_KEY_UP && action == GLFW_PRESS)   radio -= 0.2f;
+    if (key == GLFW_KEY_DOWN && action == GLFW_PRESS) radio += 0.2f;
+    if (key == GLFW_KEY_W && action == GLFW_PRESS)    radio -= 0.2f;
+    if (key == GLFW_KEY_S && action == GLFW_PRESS)    radio += 0.2f;
+
     if (key == GLFW_KEY_SPACE && action == GLFW_PRESS) {
-        //dado = (rand() % 6) + 1;
-        dado = 5;
+        if (dado_lanzado) return;
+        dado = (rand() % 6) + 1;
+        //dado = 5;
+        tiempo_dado = glfwGetTime();
         dado_lanzado = true;
-        std::cout << "Dado: " << dado << std::endl;
-    }
-    if (key == GLFW_KEY_1 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 0;
-    if (key == GLFW_KEY_2 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 1;
-    if (key == GLFW_KEY_3 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 2;
-    if (key == GLFW_KEY_4 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 3;
-    if (key == GLFW_KEY_ENTER && action == GLFW_PRESS && dado_lanzado) {
-        mover_ficha(fichas[ficha_seleccionada], dado);
-        dado_lanzado = false;
-        turno_actual = (turno_actual + 1) % 4;  // pasar turno
+
+        //si todas las fichas están en casa y no ha salido 5, pasar turno
+        ColorJugador color_turno = orden_turnos[turno_actual];
+        bool alguna_fuera = false;
+        for (int j = 0; j < 16; j++) {
+            if (fichas[j].color == color_turno && fichas[j].casilla_actual < 100 && !fichas[j].en_meta) {
+                alguna_fuera = true;
+                break;
+            }
+        }
+        if (!alguna_fuera && dado != 5) {
+            mostrar_mensaje("Sin fichas fuera y dado != 5, turno pasado");
+            dado_lanzado = false;
+            turno_actual = (turno_actual + 1) % 4;
+            ficha_seleccionada = -1;
+        }
     }
 
+    if (dado_lanzado) {
+        if (key == GLFW_KEY_1 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 0;
+        if (key == GLFW_KEY_2 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 1;
+        if (key == GLFW_KEY_3 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 2;
+        if (key == GLFW_KEY_4 && action == GLFW_PRESS) ficha_seleccionada = turno_actual * 4 + 3;
+    }
+
+    if (key == GLFW_KEY_ENTER && action == GLFW_PRESS && dado_lanzado && ficha_seleccionada != -1) {
+
+        // simular el movimiento paso a paso
+        int casilla_sim = fichas[ficha_seleccionada].casilla_actual;
+        bool meta_temp  = fichas[ficha_seleccionada].en_meta;
+        bool movimiento_valido = true;
+
+        for (int p = 0; p < dado; p++) {
+            int sig = -1;
+
+            if (casilla_sim >= 100) {
+                if (dado != 5) { movimiento_valido = false; break; }
+                if (fichas[ficha_seleccionada].color == AMARILLO) sig = 0;
+                else if (fichas[ficha_seleccionada].color == AZUL)  sig = 17;
+                else if (fichas[ficha_seleccionada].color == ROJO)  sig = 34;
+                else if (fichas[ficha_seleccionada].color == VERDE) sig = 51;
+                // salida siempre se puede con 5, no hay bloqueo en salida
+                casilla_sim = sig;
+                continue;
+            } else if (!meta_temp && grafo[casilla_sim].next_meta != -1
+                    && fichas[ficha_seleccionada].color == grafo[casilla_sim].color) {
+                sig = grafo[casilla_sim].next_meta;
+                meta_temp = true;
+            } else {
+                sig = grafo[casilla_sim].next;
+            }
+
+            if (sig == -1) break;
+
+            // comprobar bloqueo enemigo en cada casilla intermedia Y final
+            int enemigos_en_sig = 0;
+            for (int j = 0; j < 16; j++)
+                if (fichas[j].casilla_actual == sig && fichas[j].color != fichas[ficha_seleccionada].color)
+                    enemigos_en_sig++;
+
+            if (enemigos_en_sig >= 2) {
+                movimiento_valido = false;  // bloqueada por enemigo, no puede pasar
+                break;
+            }
+
+            casilla_sim = sig;
+        }
+
+        // comprobar que el destino final no esta lleno de fichas propias
+        int total_en_destino = fichas_en_casilla(casilla_sim);
+        bool es_meta_o_final = (casilla_sim == 75 || casilla_sim == 83 || casilla_sim == 91 || casilla_sim == 99);
+        if (total_en_destino >= 2 && !es_meta_o_final) movimiento_valido = false;
+        if (total_en_destino >= 4) movimiento_valido = false; 
+
+        if (!movimiento_valido) {
+            mostrar_mensaje("Movimiento invalido");
+            return;  // no pierde turno
+        }
+
+        // movimiento valido, hacerlo
+        mover_ficha(fichas[ficha_seleccionada], dado);
+        ColorJugador color_movido = fichas[ficha_seleccionada].color;
+        if (comprobar_victoria(color_movido)) {
+            duracion_mensaje = 999.0;  // que se quede hasta reiniciar
+            const char* nombres_color[4] = { "Rojo", "Azul", "Verde", "Amarillo" };
+            mostrar_mensaje("¡¡Ha ganado el jugador " + std::string(nombres_color[color_movido]) + "!!");
+            dado_lanzado = false;
+            ficha_seleccionada = -1;
+            return;  // bloquear el juego
+        }
+
+        // ── COMER FICHAS ENEMIGAS ──────────────────────────────
+        int casilla_destino = fichas[ficha_seleccionada].casilla_actual;
+        bool casilla_es_segura = (grafo[casilla_destino].tipo == SEGURO || 
+                                grafo[casilla_destino].tipo == SALIDA);
+
+        if (!casilla_es_segura && casilla_destino < 68) {  // no come en meta
+            for (int j = 0; j < 16; j++) {
+                if (j == ficha_seleccionada) continue;
+                if (fichas[j].color == fichas[ficha_seleccionada].color) continue; // misma equipo
+                if (fichas[j].casilla_actual != casilla_destino) continue; // no está ahí
+
+                // mandar a casa
+                int base_casa;
+                switch (fichas[j].color) {
+                    case AMARILLO: base_casa = 100; break;
+                    case AZUL:     base_casa = 104; break;
+                    case ROJO:     base_casa = 108; break;
+                    case VERDE:    base_casa = 112; break;
+                    default:       base_casa = 100; break;
+                }
+                // buscar hueco libre en su casa
+                for (int k = 0; k < 4; k++) {
+                    bool ocupada = false;
+                    for (int m = 0; m < 16; m++)
+                        if (fichas[m].casilla_actual == base_casa + k) { ocupada = true; break; }
+                    if (!ocupada) {
+                        fichas[j].casilla_actual = base_casa + k;
+                        fichas[j].en_meta = false;
+                        std::string colorLocal;
+                        switch (fichas[j].color) {
+                            case AMARILLO: colorLocal = " amarilla"; break;
+                            case AZUL:     colorLocal = " azul";     break;
+                            case ROJO:     colorLocal = " roja";     break;
+                            case VERDE:    colorLocal = " verde";    break;
+                        }
+                        int num_local = (j % 4) + 1; //esto es para que me diga la ficha del 1 al 4 y no del 0 al 15
+                        mostrar_mensaje("Ficha " + std::to_string(num_local) + colorLocal + " comida y enviada a casa!");
+                        break;
+                    }
+                }
+            }
+        }
+        dado_lanzado = false;
+        turno_actual = (turno_actual + 1) % 4;
+        ficha_seleccionada = -1;
+    }
 }
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
