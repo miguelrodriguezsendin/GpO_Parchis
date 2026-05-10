@@ -27,10 +27,9 @@ in vec3 vColor;
 in vec3 vNormal;
 
 out vec4 color;
+uniform vec3 lightDir;
 
 void main() {
-
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
 
     vec3 N = normalize(vNormal);
 
@@ -46,7 +45,7 @@ void main() {
 
 Modelo3D::Modelo3D(const char* path) {
     cargarModelo(path);
-    crearShaders();
+    shaderProgram = 0;  // se asignará con setShaderExterno
 }
 
 // ===================== CARGA MODELO =====================
@@ -93,17 +92,10 @@ void Modelo3D::cargarModelo(const char* path) {
                 aiVector3D v = mesh->mVertices[idx];
                 aiVector3D n = mesh->mNormals[idx];
 
-                data.push_back(v.x);
-                data.push_back(v.y);
-                data.push_back(v.z);
-
-                data.push_back(n.x);
-                data.push_back(n.y);
-                data.push_back(n.z);
-
-                data.push_back(diffuse.r);
-                data.push_back(diffuse.g);
-                data.push_back(diffuse.b);
+                data.push_back(v.x); data.push_back(v.y); data.push_back(v.z);  // pos → loc 0
+                data.push_back(diffuse.r); data.push_back(diffuse.g); data.push_back(diffuse.b);  // color → loc 1
+                data.push_back(0.0f); data.push_back(0.0f);
+                data.push_back(n.x); data.push_back(n.y); data.push_back(n.z);
             }
         }
     }
@@ -121,72 +113,45 @@ void Modelo3D::cargarModelo(const char* path) {
         GL_STATIC_DRAW
     );
 
-    // Posición
+    // pos → location 0
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(
-        0,
-        3,
-        GL_FLOAT,
-        GL_FALSE,
-        9 * sizeof(float),
-        (void*)0
-    );
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 11*sizeof(float), (void*)0);
 
-    // Color
+    // color → location 1
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(
-        1,
-        3,
-        GL_FLOAT,
-        GL_FALSE,
-        9 * sizeof(float),
-        (void*)(6 * sizeof(float))
-    );
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 11*sizeof(float), (void*)(3*sizeof(float)));
 
-    // Normal
+    // uv → location 2
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(
-        2,
-        3,
-        GL_FLOAT,
-        GL_FALSE,
-        9 * sizeof(float),
-        (void*)(3 * sizeof(float))
-    );
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 11*sizeof(float), (void*)(6*sizeof(float)));
+
+    // normal → location 3
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 11*sizeof(float), (void*)(8*sizeof(float)));
 
     glBindVertexArray(0);
 
-    numVertices = data.size() / 9;
+    numVertices = data.size() / 11;
 }
 
 // ===================== SHADERS =====================
 
-void Modelo3D::crearShaders() {
-
-    GLuint vs = compilar_shader(vertex_prog, GL_VERTEX_SHADER);
-    GLuint fs = compilar_shader(fragment_prog, GL_FRAGMENT_SHADER);
-
-    shaderProgram = glCreateProgram();
-
-    glAttachShader(shaderProgram, vs);
-    glAttachShader(shaderProgram, fs);
-
-    glLinkProgram(shaderProgram);
-
-    check_errores_programa(shaderProgram);
-
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-}
-
 // ===================== DRAW =====================
 
-void Modelo3D::draw(mat4 P, mat4 V, mat4 M) {
+void Modelo3D::setShaderExterno(GLuint prog) {
+    shaderProgram = prog;
+    usar_shader_externo = true;
+}
 
+void Modelo3D::draw(mat4 P, mat4 V, mat4 M) {
     glUseProgram(shaderProgram);
-    
     transfer_mat4("MVP", P * V * M);
     transfer_mat4("M", M);
+
+    if (!usar_shader_externo) {
+        // solo si usa shader propio
+        glUniform3f(glGetUniformLocation(shaderProgram, "lightDir"), 0.5f, 1.0f, 0.8f);
+    }
 
     glBindVertexArray(VAO);
     glDrawArrays(GL_TRIANGLES, 0, numVertices);

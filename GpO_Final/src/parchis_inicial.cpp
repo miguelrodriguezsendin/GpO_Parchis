@@ -3,6 +3,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
+#include "stb_image.h"
 
 
 int ANCHO = 800, ALTO = 600;
@@ -98,6 +99,9 @@ std::string mensaje_gui = "";
 double tiempo_mensaje = 0.0;
 double duracion_mensaje = 2.0;
 
+GLuint tex_zonas = 0;
+GLuint tex_pasillos = 0;
+
 // ======================= SHADERS =========================
 
 #define GLSL(src) "#version 330 core\n" #src
@@ -105,21 +109,80 @@ double duracion_mensaje = 2.0;
 const char* vertex_prog = GLSL(
 layout(location = 0) in vec3 pos;
 layout(location = 1) in vec3 color;
+layout(location = 2) in vec2 uv;
+layout(location = 3) in vec3 normal;      // ← nueva entrada
+
 out vec3 col;
+out vec2 texCoord;
+out vec3 fragPos;        // posición en coordenadas escena
+out vec3 fragNormal;     // normal transformada
+
 uniform mat4 MVP = mat4(1.0f);
-void main() 
+uniform mat4 M   = mat4(1.0f);   // solo modelo (sin V ni P)
+
+void main()
 {
     gl_Position = MVP * vec4(pos, 1);
-    col = color;
+    col         = color;
+    texCoord    = uv;
+    fragPos     = vec3(M * vec4(pos, 1.0));
+
+    // transpuesta de la inversa de M para las normales (tus apuntes pág 17)
+    mat4 M_adj  = transpose(inverse(M));
+    fragNormal  = normalize(vec3(M_adj * vec4(normal, 0.0)));
 }
 );
 
 const char* fragment_prog = GLSL(
 in vec3 col;
-out vec3 outputColor;
-void main() 
+in vec2 texCoord;
+in vec3 fragPos;
+in vec3 fragNormal;
+
+out vec4 outputColor;
+
+uniform sampler2D tex;
+uniform bool usar_textura = false;
+
+// spotlight
+uniform vec3  luz_pos;  // posición
+uniform vec3  luz_dir; // dirección cono
+uniform float luz_cutoff; 
+uniform vec3  camara_pos;
+uniform float alpha_out; 
+
+// materiales
+uniform float Ka;   // ambiente
+uniform float Kd;   // difusa
+uniform float Ks;    // especular
+uniform float Kn;   // brillo especular
+
+void main()
 {
-    outputColor = col;
+    vec3 base_color = usar_textura
+        ? texture(tex, texCoord).rgb * col
+        : col;
+
+    // ── vectores del modelo de Phong 
+    vec3 N = normalize(fragNormal);
+    vec3 L = normalize(luz_pos - fragPos);   // polígono → luz
+    vec3 V = normalize(camara_pos - fragPos); // polígono → cámara
+
+    // vector reflejado r = 2(l·n)n - l 
+    vec3 R = reflect(-L, N);
+
+    //  spotlight: ángulo entre dirección del cono y -L 
+    vec3  spot_dir  = normalize(luz_dir);
+    float cos_angle = dot(-L, spot_dir);  // cuánto apunta al fragmento
+    float spot_factor = smoothstep(luz_cutoff - 0.05, luz_cutoff + 0.05, cos_angle);
+
+    // componentes Phong
+    float difusa   = Kd * max(dot(L, N), 0.0f);
+    float especular = Ks * pow(max(dot(R, V), 0.0f), Kn);
+
+    float iluminacion = Ka + spot_factor * (difusa + especular);
+
+    outputColor = vec4(clamp(iluminacion * base_color, 0.0f, 1.0f), alpha_out);
 }
 );
 
@@ -147,6 +210,27 @@ void addRect(float* verts, float* cols, int& idx,
     idx++;
 }
 
+GLuint cargar_textura(const char* path) {
+    GLuint texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_2D, texID);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    int w, h, ch;
+    stbi_set_flip_vertically_on_load(true);
+    unsigned char* data = stbi_load(path, &w, &h, &ch, 0);
+    if (data) {
+        GLenum fmt = (ch == 4) ? GL_RGBA : GL_RGB;
+        glTexImage2D(GL_TEXTURE_2D, 0, fmt, w, h, 0, fmt, GL_UNSIGNED_BYTE, data);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        stbi_image_free(data);
+    }
+    return texID;
+}
 objeto crear_tablero_superior_base()
 {
     objeto obj;
@@ -191,6 +275,26 @@ objeto crear_tablero_superior_base()
     glBufferData(GL_ARRAY_BUFFER, sizeof(col), col, GL_STATIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float uvs_dummy[12] = { 0,0, 0,0, 0,0, 0,0, 0,0, 0,0 };
+    GLuint uvbuf;
+    glGenBuffers(1, &uvbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, uvbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uvs_dummy), uvs_dummy, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float norm[] = {
+        0,0,1,  0,0,1,  0,0,1,
+        0,0,1,  0,0,1,  0,0,1
+    };
+
+    GLuint normbuf;
+    glGenBuffers(1, &normbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm), norm, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
     glBindVertexArray(0);
 
@@ -242,6 +346,25 @@ objeto crear_tablero_inferior()
     glBufferData(GL_ARRAY_BUFFER, sizeof(col), col, GL_STATIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float uvs_dummy[12] = { 0,0, 0,0, 0,0, 0,0, 0,0, 0,0 };
+    GLuint uvbuf;
+    glGenBuffers(1, &uvbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, uvbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uvs_dummy), uvs_dummy, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float norm[] = {
+        0,0,-1,  0,0,-1,  0,0,-1,
+        0,0,-1,  0,0,-1,  0,0,-1
+    };
+    GLuint normbuf;
+    glGenBuffers(1, &normbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm), norm, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
     glBindVertexArray(0);
 
@@ -298,6 +421,31 @@ objeto crear_tablero_laterales()
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
+    float uvs_dummy[12] = { 0,0, 0,0, 0,0, 0,0, 0,0, 0,0 };
+    GLuint uvbuf;
+    glGenBuffers(1, &uvbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, uvbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uvs_dummy), uvs_dummy, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float norm[] = {
+        // Norte (y positivo)
+        0,1,0,  0,1,0,  0,1,0,   0,1,0,  0,1,0,  0,1,0,
+        // Sur (y negativo)
+        0,-1,0, 0,-1,0, 0,-1,0,  0,-1,0, 0,-1,0, 0,-1,0,
+        // Este (x positivo)
+        1,0,0,  1,0,0,  1,0,0,   1,0,0,  1,0,0,  1,0,0,
+        // Oeste (x negativo)
+        -1,0,0, -1,0,0, -1,0,0,  -1,0,0, -1,0,0, -1,0,0
+    };
+    GLuint normbuf;
+    glGenBuffers(1, &normbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm), norm, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
     glBindVertexArray(0);
 
     obj.VAO = VAO;
@@ -310,32 +458,39 @@ objeto crear_zonas_color()
     GLuint VAO;
 
     float z = 0.001f;
-    float d = 0.4f; //distancia entre el medio y cada uno de los 4 rectangulos (si es 0.2 los rect seran mas grandes)
+    float d = 0.4f;
 
-    // 4 rectángulos → 4 * 18 floats = 72 floats
     float verts[72];
     float cols[72];
 
     int idx = 0;
 
-    // Colores según tu foto
     float azul[3]     = {0.2f, 0.2f, 0.9f};
     float amarillo[3] = {0.9f, 0.9f, 0.2f};
     float verde[3]    = {0.2f, 0.8f, 0.2f};
     float rojo[3]     = {0.9f, 0.2f, 0.2f};
 
-    // Zonas
-    addRect(verts, cols, idx, -1.0f,  d, -d,  1.0f, z, azul[0], azul[1], azul[2]);     // arriba izda
-    addRect(verts, cols, idx,  d,  d,  1.0f,  1.0f, z, amarillo[0], amarillo[1], amarillo[2]); // arriba dcha
-    addRect(verts, cols, idx,  d, -1.0f,  1.0f, -d, z, verde[0], verde[1], verde[2]);    // abajo dcha
-    addRect(verts, cols, idx, -1.0f, -1.0f, -d, -d, z, rojo[0], rojo[1], rojo[2]);     // abajo izda
+    addRect(verts, cols, idx, -1.0f,  d, -d,  1.0f, z, azul[0], azul[1], azul[2]);
+    addRect(verts, cols, idx,  d,  d,  1.0f,  1.0f, z, amarillo[0], amarillo[1], amarillo[2]);
+    addRect(verts, cols, idx,  d, -1.0f,  1.0f, -d, z, verde[0], verde[1], verde[2]);
+    addRect(verts, cols, idx, -1.0f, -1.0f, -d, -d, z, rojo[0], rojo[1], rojo[2]);
 
+    //UVs: cada rectángulo tiene 6 vértices, 2 floats cada uno → 4*6*2 = 48 floats
+    float uvs[48] = {
+        // rect 0 azul
+        0,0,  1,0,  1,1,   0,0,  1,1,  0,1,
+        // rect 1 amarillo
+        0,0,  1,0,  1,1,   0,0,  1,1,  0,1,
+        // rect 2 verde
+        0,0,  1,0,  1,1,   0,0,  1,1,  0,1,
+        // rect 3 rojo
+        0,0,  1,0,  1,1,   0,0,  1,1,  0,1,
+    };
 
-    // Crear VAO único
     glGenVertexArrays(1, &VAO);
     glBindVertexArray(VAO);
 
-    GLuint pos, col;
+    GLuint pos, col, uvbuf;
     glGenBuffers(1, &pos);
     glBindBuffer(GL_ARRAY_BUFFER, pos);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
@@ -348,11 +503,29 @@ objeto crear_zonas_color()
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
+    glGenBuffers(1, &uvbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, uvbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uvs), uvs, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    
+    float norm_zonas[72]; // 4 rects * 6 verts * 3 floats
+    for (int i = 0; i < 24; i++) {
+        norm_zonas[i*3+0] = 0.0f;
+        norm_zonas[i*3+1] = 0.0f;
+        norm_zonas[i*3+2] = 1.0f;
+    }
+    GLuint normbuf;
+    glGenBuffers(1, &normbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm_zonas), norm_zonas, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
     glBindVertexArray(0);
 
     obj.VAO = VAO;
-    obj.Nv  = 24; // 4 rectángulos * 6 vértices
-
+    obj.Nv  = 24;
     return obj;
 }
 
@@ -400,10 +573,17 @@ objeto crear_pasillos()
         0.9f,0.2f,0.2f,  0.9f,0.2f,0.2f,  0.9f,0.2f,0.2f
     };
 
+    float uvs_pasillos[48] = {
+        0,0, 1,0, 1,1,  0,0, 1,1, 0,1,  // azul
+        0,0, 1,0, 1,1,  0,0, 1,1, 0,1,  // amarillo
+        0,0, 1,0, 1,1,  0,0, 1,1, 0,1,  // verde
+        0,0, 1,0, 1,1,  0,0, 1,1, 0,1,  // rojo
+    };
+
     glGenVertexArrays(1, &VAO);
     glBindVertexArray(VAO);
 
-    GLuint pos, colbuf;
+    GLuint pos, colbuf, uvbuf;
     glGenBuffers(1, &pos);
     glBindBuffer(GL_ARRAY_BUFFER, pos);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
@@ -415,6 +595,25 @@ objeto crear_pasillos()
     glBufferData(GL_ARRAY_BUFFER, sizeof(col), col, GL_STATIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    glGenBuffers(1, &uvbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, uvbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uvs_pasillos), uvs_pasillos, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float norm_pas[72]; // 4 pasillos * 6 verts * 3 floats
+    for (int i = 0; i < 24; i++) {
+        norm_pas[i*3+0] = 0.0f;
+        norm_pas[i*3+1] = 0.0f;
+        norm_pas[i*3+2] = 1.0f;
+    }
+    GLuint normbuf2;
+    glGenBuffers(1, &normbuf2);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf2);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm_pas), norm_pas, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
     glBindVertexArray(0);
 
@@ -448,10 +647,17 @@ objeto crear_estrella_central()
         0.9f,0.2f,0.2f,  0.9f,0.2f,0.2f,  0.9f,0.2f,0.2f
     };
 
+    float uvs_estrella[24] = {
+        0,0, 1,0, 1,1,  // triángulo azul
+        0,0, 1,0, 1,1,  // triángulo amarillo
+        0,0, 1,0, 1,1,  // triángulo verde
+        0,0, 1,0, 1,1,  // triángulo rojo
+    };
+
     glGenVertexArrays(1, &VAO);
     glBindVertexArray(VAO);
 
-    GLuint pos, colbuf;
+    GLuint pos, colbuf, uvbuf;
     glGenBuffers(1, &pos);
     glBindBuffer(GL_ARRAY_BUFFER, pos);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
@@ -463,6 +669,25 @@ objeto crear_estrella_central()
     glBufferData(GL_ARRAY_BUFFER, sizeof(col), col, GL_STATIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    glGenBuffers(1, &uvbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, uvbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uvs_estrella), uvs_estrella, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+    float norm_est[36]; // 4 triangulos * 3 verts * 3 floats
+    for (int i = 0; i < 12; i++) {
+        norm_est[i*3+0] = 0.0f;
+        norm_est[i*3+1] = 0.0f;
+        norm_est[i*3+2] = 1.0f;
+    }
+    GLuint normbuf3;
+    glGenBuffers(1, &normbuf3);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf3);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm_est), norm_est, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
     glBindVertexArray(0);
 
@@ -549,6 +774,35 @@ objeto crear_bordes()
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
+    float norm_bordes[] = {
+        // Borde superior - cara horizontal (apunta arriba)
+        0,0,1, 0,0,1, 0,0,1,  0,0,1, 0,0,1, 0,0,1,
+        // Borde superior - cara vertical (apunta hacia Y+)
+        0,1,0, 0,1,0, 0,1,0,  0,1,0, 0,1,0, 0,1,0,
+
+        // Borde inferior - cara horizontal
+        0,0,1, 0,0,1, 0,0,1,  0,0,1, 0,0,1, 0,0,1,
+        // Borde inferior - cara vertical (apunta hacia Y-)
+        0,-1,0, 0,-1,0, 0,-1,0,  0,-1,0, 0,-1,0, 0,-1,0,
+
+        // Borde izquierdo - cara horizontal
+        0,0,1, 0,0,1, 0,0,1,  0,0,1, 0,0,1, 0,0,1,
+        // Borde izquierdo - cara vertical (apunta hacia X-)
+        -1,0,0, -1,0,0, -1,0,0,  -1,0,0, -1,0,0, -1,0,0,
+
+        // Borde derecho - cara horizontal
+        0,0,1, 0,0,1, 0,0,1,  0,0,1, 0,0,1, 0,0,1,
+        // Borde derecho - cara vertical (apunta hacia X+)
+        1,0,0, 1,0,0, 1,0,0,  1,0,0, 1,0,0, 1,0,0,
+    };
+
+    GLuint normbuf;
+    glGenBuffers(1, &normbuf);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(norm_bordes), norm_bordes, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
     glBindVertexArray(0);
 
     obj.VAO = VAO;
@@ -616,6 +870,17 @@ objeto crear_casillas_desde_grafo(float size, float z) {
     glBufferData(GL_ARRAY_BUFFER, cols.size()*sizeof(float), cols.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,0,0);
+
+    std::vector<float> norms(verts.size(), 0.0f); // mismo tamaño
+    for (int i = 2; i < (int)norms.size(); i += 3)
+        norms[i] = 1.0f;  // z=1 para todas
+
+    GLuint normbuf4;
+    glGenBuffers(1, &normbuf4);
+    glBindBuffer(GL_ARRAY_BUFFER, normbuf4);
+    glBufferData(GL_ARRAY_BUFFER, norms.size()*sizeof(float), norms.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
 
     glBindVertexArray(0);
 
@@ -690,10 +955,6 @@ void configurar_camino_principal() {
     grafo[55].tipo = SEGURO;
     grafo[62].tipo = SEGURO;  
     grafo[67].tipo = SEGURO;
-    grafo[0].tipo  = SALIDA;   // salida AMARILLO
-    grafo[17].tipo = SALIDA;   // salida AZUL  
-    grafo[34].tipo = SALIDA;   // salida ROJO
-    grafo[51].tipo = SALIDA;   // salida VERDE
 }
 struct InfoColor {
     ColorJugador color;
@@ -965,6 +1226,96 @@ void mostrar_mensaje(const std::string& msg) {
     mensaje_gui = msg;
     tiempo_mensaje = glfwGetTime();
 }
+void dibujar_sombra_fake(GLuint prog, mat4 P, mat4 V, float cx, float cy, float sx, float sy) {
+    const int SEGMENTOS = 24;
+    static GLuint shadowVAO = 0;
+    static GLuint shadowVBO_pos = 0;
+    static GLuint shadowVBO_col = 0;
+    static GLuint shadowVBO_uv  = 0;
+    static GLuint shadowVBO_nor = 0;
+    static int    shadowNv = 0;
+    const float PI = 3.14159265358979323846f;
+
+    if (!shadowVAO) {
+        // Círculo unitario de radio 1 centrado en origen, formado por triángulos tipo "abanico"
+        std::vector<float> vpos, vcol, vuv, vnor;
+        for (int k = 0; k < SEGMENTOS; k++) {
+            float a0 = 2.0f * PI * k       / SEGMENTOS;
+            float a1 = 2.0f * PI * (k + 1) / SEGMENTOS;
+
+            // centro
+            vpos.insert(vpos.end(), {0.0f, 0.0f, 0.0f});
+            // punto k
+            vpos.insert(vpos.end(), {cosf(a0), sinf(a0), 0.0f});
+            // punto k+1
+            vpos.insert(vpos.end(), {cosf(a1), sinf(a1), 0.0f});
+
+            for (int j = 0; j < 3; j++) {
+                vcol.insert(vcol.end(), {0.1f, 0.1f, 0.1f}); // gris muy oscuro
+                vuv.insert(vuv.end(),   {0.0f, 0.0f});
+                vnor.insert(vnor.end(), {0.0f, 0.0f, 1.0f});
+            }
+        }
+        shadowNv = (int)vpos.size() / 3;
+
+        glGenVertexArrays(1, &shadowVAO);
+        glBindVertexArray(shadowVAO);
+
+        glGenBuffers(1, &shadowVBO_pos);
+        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_pos);
+        glBufferData(GL_ARRAY_BUFFER, vpos.size()*sizeof(float), vpos.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glGenBuffers(1, &shadowVBO_col);
+        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_col);
+        glBufferData(GL_ARRAY_BUFFER, vcol.size()*sizeof(float), vcol.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glGenBuffers(1, &shadowVBO_uv);
+        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_uv);
+        glBufferData(GL_ARRAY_BUFFER, vuv.size()*sizeof(float), vuv.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glGenBuffers(1, &shadowVBO_nor);
+        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_nor);
+        glBufferData(GL_ARRAY_BUFFER, vnor.size()*sizeof(float), vnor.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+        glBindVertexArray(0);
+    }
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);  // no escribir al depth buffer
+
+    glUniform1f(glGetUniformLocation(prog, "Ka"), 0.4f);
+    glUniform1f(glGetUniformLocation(prog, "Kd"), 0.0f);
+    glUniform1f(glGetUniformLocation(prog, "Ks"), 0.0f);
+    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 0.4f);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
+
+    mat4 Ms = mat4(1.0f);
+    Ms = translate(Ms, vec3(cx, cy, 0.006f));
+    Ms = scale(Ms, vec3(sx, sy, 1.0f));
+    transfer_mat4("MVP", P * V * Ms);
+    transfer_mat4("M",   Ms);
+
+    glBindVertexArray(shadowVAO);
+    glDrawArrays(GL_TRIANGLES, 0, shadowNv);
+    glBindVertexArray(0);
+
+    // Restaurar estado
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glUniform1f(glGetUniformLocation(prog, "Ka"), 0.5f);
+    glUniform1f(glGetUniformLocation(prog, "Kd"), 1.5f);
+    glUniform1f(glGetUniformLocation(prog, "Ks"), 0.15f);
+    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 1.0f);
+}
 
 // ======================= INIT SCENE =========================
 
@@ -974,6 +1325,9 @@ void init_scene() {
     glViewport(0, 0, width, height);
 
 	glEnable(GL_DEPTH_TEST);
+    
+    tex_zonas = cargar_textura("../data/snow_01_diff_4k.jpg");
+    tex_pasillos = cargar_textura("../data/Donut.jpg");
 
 //importados
     Hangar = new Modelo3D("../data/hangar2.obj");
@@ -1038,6 +1392,16 @@ void init_scene() {
     glDeleteShader(fs);
 
     glUseProgram(prog);
+    Hangar->setShaderExterno(prog);
+    nave->setShaderExterno(prog);
+    TieInterceptor->setShaderExterno(prog);
+    R2D2->setShaderExterno(prog);
+    Mask->setShaderExterno(prog);
+    CloneTurret->setShaderExterno(prog);
+    StormT->setShaderExterno(prog);
+    building->setShaderExterno(prog);
+    LightSaber->setShaderExterno(prog);
+    Falcon->setShaderExterno(prog);
 
 	glfwSetScrollCallback(window, scroll_callback);
 
@@ -1202,7 +1566,16 @@ void render_scene() {
 	mat4 V = lookAt(pos_obs, vec3(0.0f, 0.0f, 0.0f), vec3(0,0,1));	
     mat4 M = mat4(1.0f);
 
-    glUseProgram(prog); 
+    glUseProgram(prog);
+    glUniform3f(glGetUniformLocation(prog, "camara_pos"), pos_obs.x, pos_obs.y, pos_obs.z);
+    glUniform3f(glGetUniformLocation(prog, "luz_pos"),  0.0f, 0.0f, 2.0f);
+    glUniform3f(glGetUniformLocation(prog, "luz_dir"),  0.0f, 0.0f, -1.0f);
+    glUniform1f(glGetUniformLocation(prog, "luz_cutoff"), 0.85f);
+    glUniform1f(glGetUniformLocation(prog, "Ka"),  0.5f);
+    glUniform1f(glGetUniformLocation(prog, "Kd"),  1.5f);
+    glUniform1f(glGetUniformLocation(prog, "Ks"),  0.15f);
+    glUniform1f(glGetUniformLocation(prog, "Kn"),  16.0f);
+    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 1.0f);  // todo opaco por defecto
     transfer_mat4("MVP", P * V * M);
 
 	glBindVertexArray(tablero_superior.VAO);
@@ -1214,14 +1587,31 @@ void render_scene() {
 	glBindVertexArray(tablero_laterales.VAO);
 	glDrawArrays(GL_TRIANGLES, 0, tablero_laterales.Nv);
 
-	glBindVertexArray(zonas_color.VAO);
-	glDrawArrays(GL_TRIANGLES, 0, zonas_color.Nv);
+	glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_zonas);
+    glUniform1i(glGetUniformLocation(prog, "tex"), 0);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);  // ← activar
+    glBindVertexArray(zonas_color.VAO);
+    glDrawArrays(GL_TRIANGLES, 0, zonas_color.Nv);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
 
-	glBindVertexArray(pasillos.VAO);
-	glDrawArrays(GL_TRIANGLES, 0, pasillos.Nv);
+    // pasillos
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_pasillos);
+    glUniform1i(glGetUniformLocation(prog, "tex"), 0);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);
+    glBindVertexArray(pasillos.VAO);
+    glDrawArrays(GL_TRIANGLES, 0, pasillos.Nv);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
 
+    // estrella
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex_pasillos);
+    glUniform1i(glGetUniformLocation(prog, "tex"), 0);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);
     glBindVertexArray(estrella.VAO);
     glDrawArrays(GL_TRIANGLES, 0, estrella.Nv);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
 
     glBindVertexArray(bordes.VAO);
     glDrawArrays(GL_TRIANGLES, 0, bordes.Nv);
@@ -1289,6 +1679,33 @@ void render_scene() {
         mover_ficha(fichas[0],1);  // mueve solo la ficha 0
         tiempo_anterior = tiempo_actual;
     }*/
+//SOMBRAS
+    for (int i = 0; i < 4; i++) {
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float cx = grafo[idx].x + ox;
+        float cy = grafo[idx].y + oy;
+        dibujar_sombra_fake(prog, P, V, cx, cy, 0.025f, 0.015f);  // elipse pequeña
+    }
+    for (int i = 4; i < 8; i++) {   // TIE Interceptor — más ancho
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        dibujar_sombra_fake(prog, P, V, grafo[idx].x+ox, grafo[idx].y+oy, 0.05f, 0.02f);
+    }
+    for (int i = 8; i < 12; i++) {  // nave roja
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        dibujar_sombra_fake(prog, P, V, grafo[idx].x+ox, grafo[idx].y+oy, 0.03f, 0.015f);
+    }
+    for (int i = 12; i < 16; i++) { // Mask verde
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        dibujar_sombra_fake(prog, P, V, grafo[idx].x+ox, grafo[idx].y+oy, 0.02f, 0.012f);
+    }
 
     // dibujar fichas en su casilla actual
     for (int i = 0; i < 4; i++) { //AMARILLAS
