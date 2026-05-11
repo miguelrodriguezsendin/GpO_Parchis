@@ -22,6 +22,7 @@ private:
 public:
     Modelo3D(const char* path);
     void draw(mat4 P, mat4 V, mat4 M);
+    void drawDepth(GLuint depthProg, mat4 lightSpaceMatrix, mat4 M);
     void setShaderExterno(GLuint prog);
     GLuint getVAO() const { return VAO; }
 };

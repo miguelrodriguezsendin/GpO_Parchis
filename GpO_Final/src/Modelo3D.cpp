@@ -157,3 +157,10 @@ void Modelo3D::draw(mat4 P, mat4 V, mat4 M) {
     glDrawArrays(GL_TRIANGLES, 0, numVertices);
     glBindVertexArray(0);
 }
+void Modelo3D::drawDepth(GLuint depthProg, mat4 lightSpaceMatrix, mat4 M) {
+    glUseProgram(depthProg);
+    transfer_mat4("MVP", lightSpaceMatrix * M);
+    glBindVertexArray(VAO);
+    glDrawArrays(GL_TRIANGLES, 0, numVertices);
+    glBindVertexArray(0);
+}

@@ -4,6 +4,7 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "stb_image.h"
+#include <glm/gtc/type_ptr.hpp>
 
 
 int ANCHO = 800, ALTO = 600;
@@ -16,7 +17,6 @@ Modelo3D* TieInterceptor = nullptr;
 Modelo3D* R2D2 = nullptr;
 Modelo3D* Mask = nullptr;
 Modelo3D* CloneTurret = nullptr;
-Modelo3D* StormT = nullptr;
 Modelo3D* building = nullptr;
 Modelo3D* LightSaber = nullptr;
 Modelo3D* Falcon = nullptr;
@@ -31,6 +31,12 @@ objeto casas;
 objeto pasillos;
 objeto estrella;
 objeto bordes;
+
+GLuint depthProg;
+GLuint depthMapFBO;
+GLuint depthMap;
+const int SHADOW_W = 2048, SHADOW_H = 2048;
+mat4 lightSpaceMatrix;
 
 
 
@@ -85,15 +91,12 @@ struct Ficha {
 
 Ficha fichas[16];          // 4 fichas amarillas de momento
 int ficha_seleccionada = -1;
-float tiempo_ultimo_movimiento = 0.0f;
-float intervalo_movimiento = 1.0f;
 
 int turno_actual = 0;  // 0=AMARILLO, 1=AZUL, 2=ROJO, 3=VERDE
 ColorJugador orden_turnos[4] = { AMARILLO, AZUL, ROJO, VERDE };
 int dado = 0;          // resultado del dado
 bool dado_lanzado = false;
 
-double tiempo_anterior = 0.0;
 double tiempo_dado = 0.0;
 std::string mensaje_gui = "";
 double tiempo_mensaje = 0.0;
@@ -116,9 +119,11 @@ out vec3 col;
 out vec2 texCoord;
 out vec3 fragPos;        // posición en coordenadas escena
 out vec3 fragNormal;     // normal transformada
+out vec4 fragPosLightSpace;
 
 uniform mat4 MVP = mat4(1.0f);
 uniform mat4 M   = mat4(1.0f);   // solo modelo (sin V ni P)
+uniform mat4 lightSpaceMatrix = mat4(1.0f);
 
 void main()
 {
@@ -126,6 +131,7 @@ void main()
     col         = color;
     texCoord    = uv;
     fragPos     = vec3(M * vec4(pos, 1.0));
+    fragPosLightSpace = lightSpaceMatrix * vec4(fragPos, 1.0);
 
     // transpuesta de la inversa de M para las normales (tus apuntes pág 17)
     mat4 M_adj  = transpose(inverse(M));
@@ -138,6 +144,7 @@ in vec3 col;
 in vec2 texCoord;
 in vec3 fragPos;
 in vec3 fragNormal;
+in vec4 fragPosLightSpace;
 
 out vec4 outputColor;
 
@@ -150,6 +157,7 @@ uniform vec3  luz_dir; // dirección cono
 uniform float luz_cutoff; 
 uniform vec3  camara_pos;
 uniform float alpha_out; 
+uniform sampler2D shadowMap;
 
 // materiales
 uniform float Ka;   // ambiente
@@ -157,6 +165,15 @@ uniform float Kd;   // difusa
 uniform float Ks;    // especular
 uniform float Kn;   // brillo especular
 
+float calcularSombra(vec4 fragPosLS) {
+    vec3 proj = fragPosLS.xyz / fragPosLS.w;
+    proj = proj * 0.5 + 0.5;
+    if (proj.z > 1.0) return 0.0;
+    float closestDepth = texture(shadowMap, proj.xy).r;
+    float currentDepth = proj.z;
+    float bias = 0.005;
+    return (currentDepth - bias > closestDepth) ? 1.0 : 0.0;
+}
 void main()
 {
     vec3 base_color = usar_textura
@@ -180,9 +197,23 @@ void main()
     float difusa   = Kd * max(dot(L, N), 0.0f);
     float especular = Ks * pow(max(dot(R, V), 0.0f), Kn);
 
-    float iluminacion = Ka + spot_factor * (difusa + especular);
+    float sombra = calcularSombra(fragPosLightSpace);
+    float iluminacion = Ka + (1.0 - sombra) * spot_factor * (difusa + especular);
 
     outputColor = vec4(clamp(iluminacion * base_color, 0.0f, 1.0f), alpha_out);
+}
+);
+const char* depth_vertex_prog = GLSL(
+layout(location = 0) in vec3 pos;
+uniform mat4 MVP;
+void main() {
+    gl_Position = MVP * vec4(pos, 1.0);
+}
+);
+
+const char* depth_fragment_prog = GLSL(
+void main() {
+    
 }
 );
 
@@ -305,7 +336,7 @@ objeto crear_tablero_superior_base()
 objeto crear_tablero_inferior()
 {
     objeto obj;
-    GLuint VAO, VBO;
+    GLuint VAO;
 
     float z = -0.1f; // grosor
 
@@ -843,7 +874,6 @@ objeto crear_casillas_desde_grafo(float size, float z) {
         float r=0.9f,g=0.9f,b=0.9f;
 
         if (c.tipo == SEGURO) { r = g = b = 0.7f; }
-        if (c.tipo == SALIDA) { r = 1.0f; g = 1.0f; b = 1.0f; }
         if (c.tipo == META || c.tipo == FINAL || c.tipo == CASA) {
             if (c.color == ROJO)     { r=0.65f; g=0.15f; b=0.15f; }
             if (c.color == AZUL)     { r=0.15f; g=0.15f; b=0.70f; }
@@ -916,7 +946,7 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
     radio -= yoffset * 0.2f;
     if (radio < 2.0f) radio = 2.0f;   // límite mínimo
-    if (radio > 7.0f) radio = 7.0f; // límite máximo
+    if (radio > 5.5f) radio = 5.5f; // límite máximo
 }
 
 
@@ -1226,97 +1256,30 @@ void mostrar_mensaje(const std::string& msg) {
     mensaje_gui = msg;
     tiempo_mensaje = glfwGetTime();
 }
-void dibujar_sombra_fake(GLuint prog, mat4 P, mat4 V, float cx, float cy, float sx, float sy) {
-    const int SEGMENTOS = 24;
-    static GLuint shadowVAO = 0;
-    static GLuint shadowVBO_pos = 0;
-    static GLuint shadowVBO_col = 0;
-    static GLuint shadowVBO_uv  = 0;
-    static GLuint shadowVBO_nor = 0;
-    static int    shadowNv = 0;
-    const float PI = 3.14159265358979323846f;
+void init_shadow_map() {
+    // Framebuffer
+    glGenFramebuffers(1, &depthMapFBO);
 
-    if (!shadowVAO) {
-        // Círculo unitario de radio 1 centrado en origen, formado por triángulos tipo "abanico"
-        std::vector<float> vpos, vcol, vuv, vnor;
-        for (int k = 0; k < SEGMENTOS; k++) {
-            float a0 = 2.0f * PI * k       / SEGMENTOS;
-            float a1 = 2.0f * PI * (k + 1) / SEGMENTOS;
+    // Textura de profundidad
+    glGenTextures(1, &depthMap);
+    glBindTexture(GL_TEXTURE_2D, depthMap);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT,
+                 SHADOW_W, SHADOW_H, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    float border[] = {1,1,1,1};
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
 
-            // centro
-            vpos.insert(vpos.end(), {0.0f, 0.0f, 0.0f});
-            // punto k
-            vpos.insert(vpos.end(), {cosf(a0), sinf(a0), 0.0f});
-            // punto k+1
-            vpos.insert(vpos.end(), {cosf(a1), sinf(a1), 0.0f});
-
-            for (int j = 0; j < 3; j++) {
-                vcol.insert(vcol.end(), {0.1f, 0.1f, 0.1f}); // gris muy oscuro
-                vuv.insert(vuv.end(),   {0.0f, 0.0f});
-                vnor.insert(vnor.end(), {0.0f, 0.0f, 1.0f});
-            }
-        }
-        shadowNv = (int)vpos.size() / 3;
-
-        glGenVertexArrays(1, &shadowVAO);
-        glBindVertexArray(shadowVAO);
-
-        glGenBuffers(1, &shadowVBO_pos);
-        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_pos);
-        glBufferData(GL_ARRAY_BUFFER, vpos.size()*sizeof(float), vpos.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
-
-        glGenBuffers(1, &shadowVBO_col);
-        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_col);
-        glBufferData(GL_ARRAY_BUFFER, vcol.size()*sizeof(float), vcol.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, 0);
-
-        glGenBuffers(1, &shadowVBO_uv);
-        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_uv);
-        glBufferData(GL_ARRAY_BUFFER, vuv.size()*sizeof(float), vuv.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, 0);
-
-        glGenBuffers(1, &shadowVBO_nor);
-        glBindBuffer(GL_ARRAY_BUFFER, shadowVBO_nor);
-        glBufferData(GL_ARRAY_BUFFER, vnor.size()*sizeof(float), vnor.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(3);
-        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
-
-        glBindVertexArray(0);
-    }
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);  // no escribir al depth buffer
-
-    glUniform1f(glGetUniformLocation(prog, "Ka"), 0.4f);
-    glUniform1f(glGetUniformLocation(prog, "Kd"), 0.0f);
-    glUniform1f(glGetUniformLocation(prog, "Ks"), 0.0f);
-    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 0.4f);
-    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
-
-    mat4 Ms = mat4(1.0f);
-    Ms = translate(Ms, vec3(cx, cy, 0.006f));
-    Ms = scale(Ms, vec3(sx, sy, 1.0f));
-    transfer_mat4("MVP", P * V * Ms);
-    transfer_mat4("M",   Ms);
-
-    glBindVertexArray(shadowVAO);
-    glDrawArrays(GL_TRIANGLES, 0, shadowNv);
-    glBindVertexArray(0);
-
-    // Restaurar estado
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-    glUniform1f(glGetUniformLocation(prog, "Ka"), 0.5f);
-    glUniform1f(glGetUniformLocation(prog, "Kd"), 1.5f);
-    glUniform1f(glGetUniformLocation(prog, "Ks"), 0.15f);
-    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 1.0f);
+    // Adjuntar textura al framebuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, depthMap, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
-
 // ======================= INIT SCENE =========================
 
 void init_scene() {
@@ -1336,14 +1299,13 @@ void init_scene() {
     R2D2 = new Modelo3D("../data/R2-D2.obj");  
     Mask = new Modelo3D("../data/Mask.obj");  
     CloneTurret = new Modelo3D("../data/CloneTurret.obj");
-    StormT = new Modelo3D("../data/StormT.obj");
     building = new Modelo3D("../data/building.obj");
     LightSaber = new Modelo3D("../data/LightSaberConcept.obj");
     Falcon = new Modelo3D("../data/Falcon.obj");
 
 //logica
     construir_grafo_y_posiciones();
-    casas = crear_casillas_desde_grafo(0.06f, 0.005f); // por ejemplo 0.06 de size y 0.005 de altura z
+    casas = crear_casillas_desde_grafo(0.06f, 0.005f);
 
 
 	tablero_superior = crear_tablero_superior_base();
@@ -1398,7 +1360,6 @@ void init_scene() {
     R2D2->setShaderExterno(prog);
     Mask->setShaderExterno(prog);
     CloneTurret->setShaderExterno(prog);
-    StormT->setShaderExterno(prog);
     building->setShaderExterno(prog);
     LightSaber->setShaderExterno(prog);
     Falcon->setShaderExterno(prog);
@@ -1414,6 +1375,18 @@ void init_scene() {
     ImGui::CreateContext();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+
+    // Compilar shader de sombras
+    GLuint dvs = compilar_shader(depth_vertex_prog, GL_VERTEX_SHADER);
+    GLuint dfs = compilar_shader(depth_fragment_prog, GL_FRAGMENT_SHADER);
+    depthProg = glCreateProgram();
+    glAttachShader(depthProg, dvs);
+    glAttachShader(depthProg, dfs);
+    glLinkProgram(depthProg);
+    glDeleteShader(dvs);
+    glDeleteShader(dfs);
+
+    init_shadow_map();
 }
 
 // ======================= MATRICES =========================
@@ -1423,67 +1396,179 @@ float fov = 45.0f;
 // ======================= RENDER =========================
 
 void render_scene() {
-    glClearColor(0.2f, 0.2f, 0.25f, 1.0f);	
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // ── 1. Abrir frame ImGui ──
+    // ── PASADA 1: renderizar desde la luz para generar el depth map ──
+    vec3 luz_pos_v = vec3(0.0f, 0.0f, 2.0f);
+    mat4 lightProj = glm::ortho(-2.0f, 2.0f, -2.0f, 2.0f, 0.5f, 10.0f);
+    mat4 lightView = glm::lookAt(luz_pos_v, vec3(0,0,0), vec3(0,1,0));
+    lightSpaceMatrix = lightProj * lightView;
+
+    glViewport(0, 0, SHADOW_W, SHADOW_H);
+    glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);
+
+    glUseProgram(depthProg);
+
+    // Geometría manual — todos con M identidad
+    mat4 Mident = mat4(1.0f);
+    transfer_mat4("MVP", lightSpaceMatrix * Mident);
+    glBindVertexArray(tablero_superior.VAO);  glDrawArrays(GL_TRIANGLES, 0, tablero_superior.Nv);
+    glBindVertexArray(tablero_inferior.VAO);  glDrawArrays(GL_TRIANGLES, 0, tablero_inferior.Nv);
+    glBindVertexArray(tablero_laterales.VAO); glDrawArrays(GL_TRIANGLES, 0, tablero_laterales.Nv);
+    glBindVertexArray(zonas_color.VAO);       glDrawArrays(GL_TRIANGLES, 0, zonas_color.Nv);
+    glBindVertexArray(pasillos.VAO);          glDrawArrays(GL_TRIANGLES, 0, pasillos.Nv);
+    glBindVertexArray(estrella.VAO);          glDrawArrays(GL_TRIANGLES, 0, estrella.Nv);
+    glBindVertexArray(bordes.VAO);            glDrawArrays(GL_TRIANGLES, 0, bordes.Nv);
+    glBindVertexArray(casas.VAO);             glDrawArrays(GL_TRIANGLES, 0, casas.Nv);
+
+    // Decoración
+    mat4 MHangar = mat4(1.0f);
+    MHangar = translate(MHangar, vec3(0.0f, 0.0f, -2.0f));
+    MHangar = rotate(MHangar, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MHangar = scale(MHangar, vec3(2.0f));
+    Hangar->drawDepth(depthProg, lightSpaceMatrix, MHangar);
+
+    mat4 MDeco1 = mat4(1.0f);
+    MDeco1 = translate(MDeco1, vec3(0.7f, -0.85f, 0.0f));
+    MDeco1 = rotate(MDeco1, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco1 = rotate(MDeco1, glm::radians(180.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco1 = scale(MDeco1, vec3(0.01f));
+    CloneTurret->drawDepth(depthProg, lightSpaceMatrix, MDeco1);
+
+    mat4 MDeco1b = mat4(1.0f);
+    MDeco1b = translate(MDeco1b, vec3(0.85f, -0.7f, 0.0f));
+    MDeco1b = rotate(MDeco1b, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco1b = rotate(MDeco1b, glm::radians(180.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco1b = rotate(MDeco1b, glm::radians(270.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco1b = scale(MDeco1b, vec3(0.01f));
+    CloneTurret->drawDepth(depthProg, lightSpaceMatrix, MDeco1b);
+
+    mat4 MDeco3 = mat4(1.0f);
+    MDeco3 = translate(MDeco3, vec3(-0.85f, 0.85f, 0.0f));
+    MDeco3 = rotate(MDeco3, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco3 = scale(MDeco3, vec3(0.007f));
+    building->drawDepth(depthProg, lightSpaceMatrix, MDeco3);
+
+    mat4 MDeco4 = mat4(1.0f);
+    MDeco4 = translate(MDeco4, vec3(-0.85f, -0.5f, 0.03f));
+    MDeco4 = rotate(MDeco4, glm::radians(76.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco4 = scale(MDeco4, vec3(0.017f));
+    LightSaber->drawDepth(depthProg, lightSpaceMatrix, MDeco4);
+
+    mat4 MDeco4b = mat4(1.0f);
+    MDeco4b = translate(MDeco4b, vec3(-0.5f, -0.85f, -0.02f));
+    MDeco4b = rotate(MDeco4b, glm::radians(-76.0f), vec3(0.0f, 1.0f, 0.0f));
+    MDeco4b = scale(MDeco4b, vec3(0.017f));
+    LightSaber->drawDepth(depthProg, lightSpaceMatrix, MDeco4b);
+
+    mat4 MDeco5 = mat4(1.0f);
+    MDeco5 = translate(MDeco5, vec3(0.85f, 0.8f, 0.0f));
+    MDeco5 = rotate(MDeco5, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+    MDeco5 = scale(MDeco5, vec3(0.07f));
+    Falcon->drawDepth(depthProg, lightSpaceMatrix, MDeco5);
+
+    // Fichas
+    for (int i = 0; i < 4; i++) {
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
+        mat4 M = mat4(1.0f);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
+        M = translate(M, vec3(-0.005f, -0.005f, 0.0f));
+        M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+        M = rotate(M, glm::radians(-90.0f), vec3(0.0f, 1.0f, 0.0f));
+        M = scale(M, vec3(0.025f));
+        R2D2->drawDepth(depthProg, lightSpaceMatrix, M);
+    }
+    for (int i = 4; i < 8; i++) {
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
+        mat4 M = mat4(1.0f);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
+        M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+        M = rotate(M, glm::radians(90.0f), vec3(0.0f, 1.0f, 0.0f));
+        M = scale(M, vec3(0.09f));
+        TieInterceptor->drawDepth(depthProg, lightSpaceMatrix, M);
+    }
+    for (int i = 8; i < 12; i++) {
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
+        mat4 M = mat4(1.0f);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
+        M = translate(M, vec3(0.0f, 0.04f, 0.0f));
+        M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+        M = scale(M, vec3(0.03f));
+        nave->drawDepth(depthProg, lightSpaceMatrix, M);
+    }
+    for (int i = 12; i < 16; i++) {
+        int idx = fichas[i].casilla_actual;
+        float ox, oy;
+        get_offset_ficha(i, ox, oy);
+        float z_ficha = (ficha_seleccionada == i) ? 0.11f : 0.01f;
+        mat4 M = mat4(1.0f);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
+        M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
+        M = rotate(M, glm::radians(-90.0f), vec3(0.0f, 1.0f, 0.0f));
+        M = scale(M, vec3(0.012f));
+        Mask->drawDepth(depthProg, lightSpaceMatrix, M);
+    }
+
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // ── PASADA 2: render normal ──
+    glViewport(0, 0, ANCHO, ALTO);
+    glClearColor(0.2f, 0.2f, 0.25f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
-        // ── 2. TODA la UI junta aquí ──
     ImVec4 colores[4] = {
-        ImVec4(0.9f, 0.2f, 0.2f, 1.0f),  // ROJO
-        ImVec4(0.2f, 0.2f, 0.9f, 1.0f),  // AZUL
-        ImVec4(0.2f, 0.8f, 0.2f, 1.0f),  // VERDE
-        ImVec4(0.9f, 0.9f, 0.2f, 1.0f),  // AMARILLO
+        ImVec4(0.9f, 0.2f, 0.2f, 1.0f),
+        ImVec4(0.2f, 0.2f, 0.9f, 1.0f),
+        ImVec4(0.2f, 0.8f, 0.2f, 1.0f),
+        ImVec4(0.9f, 0.9f, 0.2f, 1.0f),
     };
     const char* nombres[4] = { "Rojo", "Azul", "Verde", "Amarillo" };
-    
+
     ImGui::SetNextWindowPos(ImVec2(ANCHO * 0.5f, 10), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
     ImGui::Begin("##turno", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
     ColorJugador color_actual = orden_turnos[turno_actual];
-
-    float escala = ANCHO / 800.0f; 
+    float escala = ANCHO / 800.0f;
     ImGui::SetWindowFontScale(escala * 1.5f);
     ImGui::TextColored(colores[color_actual], "Turno: %s", nombres[color_actual]);
-    if (dado_lanzado)
-        ImGui::Text("Dado: %d", dado);
-    else
-        ImGui::Text("Pulsa ESPACIO para tirar");
+    if (dado_lanzado) ImGui::Text("Dado: %d", dado);
+    else ImGui::Text("Pulsa ESPACIO para tirar");
     ImGui::End();
 
-    // Ventana de instrucciones — esquina inferior izquierda
     ImGui::SetNextWindowPos(ImVec2(10, ALTO - 120 * escala));
-    ImGui::Begin("##instrucciones", nullptr, 
-        ImGuiWindowFlags_NoTitleBar | 
-        ImGuiWindowFlags_NoResize | 
-        ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoBackground);  // sin fondo para que sea más limpio
-
+    ImGui::Begin("##instrucciones", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
     ImGui::SetWindowFontScale(escala);
-
     if (!dado_lanzado) {
-        ImGui::TextColored(ImVec4(1,1,0,1), "ESPACIO");
-        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1,1,0,1), "ESPACIO"); ImGui::SameLine();
         ImGui::Text("- Tirar dado");
     } else {
-        ImGui::TextColored(ImVec4(1,1,0,1), "1 2 3 4");
-        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1,1,0,1), "1 2 3 4"); ImGui::SameLine();
         ImGui::Text("- Seleccionar ficha");
-        ImGui::TextColored(ImVec4(1,1,0,1), "ENTER  ");
-        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1,1,0,1), "ENTER  "); ImGui::SameLine();
         ImGui::Text("- Mover ficha seleccionada %d posiciones", dado);
     }
-
     ImGui::End();
 
-    // ── DADO ──────────────────────────────────────
     double ahora = glfwGetTime();
     if (dado_lanzado && (ahora - tiempo_dado) < 2.0) {
         ImDrawList* draw = ImGui::GetForegroundDrawList();
-        
-        // Color según turno
         ImU32 color_dado;
         switch(color_actual) {
             case ROJO:     color_dado = IM_COL32(220, 50,  50,  255); break;
@@ -1491,280 +1576,143 @@ void render_scene() {
             case VERDE:    color_dado = IM_COL32(50,  200, 50,  255); break;
             case AMARILLO: color_dado = IM_COL32(220, 220, 50,  255); break;
         }
-
-        float cx = ANCHO * 0.5f;
-        float cy = ALTO  * 0.5f;
-        float s  = 80.0f;   // tamaño del dado
-
-        // Cara del dado
-        draw->AddRectFilled(
-            ImVec2(cx - s, cy - s),
-            ImVec2(cx + s, cy + s),
-            color_dado, 16.0f  // radio de esquinas
-        );
-        // Borde
-        draw->AddRect(
-            ImVec2(cx - s, cy - s),
-            ImVec2(cx + s, cy + s),
-            IM_COL32(255,255,255,200), 16.0f, 0, 3.0f
-        );
-
-        // Puntos según valor del dado
-        ImU32 punto_col = IM_COL32(255, 255, 255, 255);
-        float r = 10.0f;  // radio del punto
-        float d = s * 0.55f;  // distancia del centro
-
-        // Posiciones de los 7 posibles puntos
+        float cx = ANCHO * 0.5f, cy = ALTO * 0.5f, s = 80.0f;
+        draw->AddRectFilled(ImVec2(cx-s,cy-s), ImVec2(cx+s,cy+s), color_dado, 16.0f);
+        draw->AddRect(ImVec2(cx-s,cy-s), ImVec2(cx+s,cy+s), IM_COL32(255,255,255,200), 16.0f, 0, 3.0f);
+        ImU32 punto_col = IM_COL32(255,255,255,255);
+        float r = 10.0f, d = s * 0.55f;
         ImVec2 pts[7] = {
-            ImVec2(cx - d, cy - d),  // 0: arriba-izda
-            ImVec2(cx + d, cy - d),  // 1: arriba-dcha
-            ImVec2(cx - d, cy),      // 2: medio-izda
-            ImVec2(cx,     cy),      // 3: centro
-            ImVec2(cx + d, cy),      // 4: medio-dcha
-            ImVec2(cx - d, cy + d),  // 5: abajo-izda
-            ImVec2(cx + d, cy + d),  // 6: abajo-dcha
+            ImVec2(cx-d,cy-d), ImVec2(cx+d,cy-d), ImVec2(cx-d,cy),
+            ImVec2(cx,cy),     ImVec2(cx+d,cy),    ImVec2(cx-d,cy+d), ImVec2(cx+d,cy+d)
         };
-
-        // Qué puntos se dibujan para cada valor
         bool layout[6][7] = {
-            {0,0,0,1,0,0,0},  // 1
-            {1,0,0,0,0,0,1},  // 2
-            {1,0,0,1,0,0,1},  // 3
-            {1,1,0,0,0,1,1},  // 4
-            {1,1,0,1,0,1,1},  // 5
-            {1,1,1,0,1,1,1},  // 6
+            {0,0,0,1,0,0,0}, {1,0,0,0,0,0,1}, {1,0,0,1,0,0,1},
+            {1,1,0,0,0,1,1}, {1,1,0,1,0,1,1}, {1,1,1,0,1,1,1}
         };
-
         for (int p = 0; p < 7; p++)
-            if (layout[dado-1][p])
-                draw->AddCircleFilled(pts[p], r, punto_col);
+            if (layout[dado-1][p]) draw->AddCircleFilled(pts[p], r, punto_col);
     }
 
-
-    // ── MENSAJE CENTRAL INFERIOR ──────────────────────────
     double ya = glfwGetTime();
     if (!mensaje_gui.empty() && (ya - tiempo_mensaje) < duracion_mensaje) {
-        ImGui::SetNextWindowPos(ImVec2(ANCHO * 0.5f, ALTO * 0.88f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowPos(ImVec2(ANCHO*0.5f, ALTO*0.88f), ImGuiCond_Always, ImVec2(0.5f,0.5f));
         ImGui::Begin("##mensaje", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav);
-        ImGui::SetWindowFontScale((ANCHO / 800.0f) * 2.0f);
+        ImGui::SetWindowFontScale((ANCHO/800.0f)*2.0f);
         ImGui::Text("%s", mensaje_gui.c_str());
         ImGui::End();
     }
 
-
-
-
-    mat4 P = perspective(glm::radians(fov), (float)ANCHO / (float)ALTO, 0.5f, 100.0f);
-	// Cámara orbital
-	pos_obs.x = radio * cos(angulo_h) * cos(angulo_v);
-	pos_obs.y = radio * sin(angulo_h) * cos(angulo_v);
-	pos_obs.z = radio * sin(angulo_v);
-
-	mat4 V = lookAt(pos_obs, vec3(0.0f, 0.0f, 0.0f), vec3(0,0,1));	
+    mat4 P = perspective(glm::radians(fov), (float)ANCHO/(float)ALTO, 0.5f, 100.0f);
+    pos_obs.x = radio * cos(angulo_h) * cos(angulo_v);
+    pos_obs.y = radio * sin(angulo_h) * cos(angulo_v);
+    pos_obs.z = radio * sin(angulo_v);
+    mat4 V = lookAt(pos_obs, vec3(0.0f,0.0f,0.0f), vec3(0,0,1));
     mat4 M = mat4(1.0f);
 
     glUseProgram(prog);
+    // Conectar el shadow map en TEXTURE1
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, depthMap);
+    glUniform1i(glGetUniformLocation(prog, "shadowMap"), 1);
+    glUniformMatrix4fv(glGetUniformLocation(prog, "lightSpaceMatrix"), 1, GL_FALSE, glm::value_ptr(lightSpaceMatrix));
+
     glUniform3f(glGetUniformLocation(prog, "camara_pos"), pos_obs.x, pos_obs.y, pos_obs.z);
     glUniform3f(glGetUniformLocation(prog, "luz_pos"),  0.0f, 0.0f, 2.0f);
     glUniform3f(glGetUniformLocation(prog, "luz_dir"),  0.0f, 0.0f, -1.0f);
     glUniform1f(glGetUniformLocation(prog, "luz_cutoff"), 0.85f);
-    glUniform1f(glGetUniformLocation(prog, "Ka"),  0.5f);
-    glUniform1f(glGetUniformLocation(prog, "Kd"),  1.5f);
-    glUniform1f(glGetUniformLocation(prog, "Ks"),  0.15f);
+    glUniform1f(glGetUniformLocation(prog, "Ka"),  0.1f);
+    glUniform1f(glGetUniformLocation(prog, "Kd"),  0.7f);
+    glUniform1f(glGetUniformLocation(prog, "Ks"),  0.4f);
     glUniform1f(glGetUniformLocation(prog, "Kn"),  16.0f);
-    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 1.0f);  // todo opaco por defecto
+    glUniform1f(glGetUniformLocation(prog, "alpha_out"), 1.0f);
     transfer_mat4("MVP", P * V * M);
+    transfer_mat4("M", M);
 
-	glBindVertexArray(tablero_superior.VAO);
-	glDrawArrays(GL_TRIANGLES, 0, tablero_superior.Nv);
+    glBindVertexArray(tablero_superior.VAO);  glDrawArrays(GL_TRIANGLES, 0, tablero_superior.Nv);
+    glBindVertexArray(tablero_inferior.VAO);  glDrawArrays(GL_TRIANGLES, 0, tablero_inferior.Nv);
+    glBindVertexArray(tablero_laterales.VAO); glDrawArrays(GL_TRIANGLES, 0, tablero_laterales.Nv);
 
-	glBindVertexArray(tablero_inferior.VAO);
-	glDrawArrays(GL_TRIANGLES, 0, tablero_inferior.Nv);
-
-	glBindVertexArray(tablero_laterales.VAO);
-	glDrawArrays(GL_TRIANGLES, 0, tablero_laterales.Nv);
-
-	glActiveTexture(GL_TEXTURE0);
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_zonas);
     glUniform1i(glGetUniformLocation(prog, "tex"), 0);
-    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);  // ← activar
-    glBindVertexArray(zonas_color.VAO);
-    glDrawArrays(GL_TRIANGLES, 0, zonas_color.Nv);
+    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);
+    glBindVertexArray(zonas_color.VAO); glDrawArrays(GL_TRIANGLES, 0, zonas_color.Nv);
     glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
 
-    // pasillos
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex_pasillos);
     glUniform1i(glGetUniformLocation(prog, "tex"), 0);
     glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);
-    glBindVertexArray(pasillos.VAO);
-    glDrawArrays(GL_TRIANGLES, 0, pasillos.Nv);
+    glBindVertexArray(pasillos.VAO); glDrawArrays(GL_TRIANGLES, 0, pasillos.Nv);
+    glBindVertexArray(estrella.VAO); glDrawArrays(GL_TRIANGLES, 0, estrella.Nv);
     glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
 
-    // estrella
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex_pasillos);
-    glUniform1i(glGetUniformLocation(prog, "tex"), 0);
-    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 1);
-    glBindVertexArray(estrella.VAO);
-    glDrawArrays(GL_TRIANGLES, 0, estrella.Nv);
-    glUniform1i(glGetUniformLocation(prog, "usar_textura"), 0);
+    glBindVertexArray(bordes.VAO); glDrawArrays(GL_TRIANGLES, 0, bordes.Nv);
+    glBindVertexArray(casas.VAO);  glDrawArrays(GL_TRIANGLES, 0, casas.Nv);
 
-    glBindVertexArray(bordes.VAO);
-    glDrawArrays(GL_TRIANGLES, 0, bordes.Nv);
-
-    // logica
-    glBindVertexArray(casas.VAO);
-    glDrawArrays(GL_TRIANGLES, 0, casas.Nv);
-
-    //importados
-    mat4 MHangar = mat4(1.0f);
-    MHangar = translate(MHangar, vec3(0.0f, 0.0f, -2.0f));  // ajusta posición
-    MHangar = rotate(MHangar, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
-    MHangar = scale(MHangar, vec3(2.0f));  
     Hangar->draw(P, V, MHangar);
-
-
-    mat4 MDeco1 = mat4(1.0f);
-    MDeco1 = translate(MDeco1, vec3( 0.7f,  -0.85f, 0.0f));
-    MDeco1 = rotate(MDeco1, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
-    MDeco1 = rotate(MDeco1, glm::radians(180.0f), vec3(0.0f, 1.0f, 0.0f));
-    MDeco1 = scale(MDeco1, vec3(0.01f));
     CloneTurret->draw(P, V, MDeco1);
-//segunda torreta
-    mat4 MDeco1b = mat4(1.0f);
-    MDeco1b = translate(MDeco1b, vec3( 0.85f,  -0.7f, 0.0f));
-    MDeco1b = rotate(MDeco1b, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
-    MDeco1b = rotate(MDeco1b, glm::radians(180.0f), vec3(0.0f, 1.0f, 0.0f));
-    MDeco1b = rotate(MDeco1b, glm::radians(270.0f), vec3(0.0f, 1.0f, 0.0f));
-    MDeco1b = scale(MDeco1b, vec3(0.01f));
     CloneTurret->draw(P, V, MDeco1b);
-
-   /* mat4 MDeco2 = mat4(1.0f);
-    MDeco2 = translate(MDeco2, vec3( 0.0f, -1.6f, 0.0f));
-    MDeco2 = rotate(MDeco2, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
-    MDeco2 = scale(MDeco2, vec3(0.05f));
-    StormT->draw(P, V, MDeco2);*/
-
-    mat4 MDeco3 = mat4(1.0f);
-    MDeco3 = translate(MDeco3, vec3( -0.85f,  0.85f, 0.0f));
-    MDeco3 = rotate(MDeco3, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
-    MDeco3 = scale(MDeco3, vec3(0.007f));
     building->draw(P, V, MDeco3);
-
-    mat4 MDeco4 = mat4(1.0f);
-    MDeco4 = translate(MDeco4, vec3(-0.85f,  -0.5f, 0.03f));
-    MDeco4 = rotate(MDeco4, glm::radians(76.0f), vec3(1.0f, 0.0f, 0.0f));
-    MDeco4 = scale(MDeco4, vec3(0.017f));
     LightSaber->draw(P, V, MDeco4);
-//segundo sable
-    mat4 MDeco4b = mat4(1.0f);
-    MDeco4b = translate(MDeco4b, vec3(-0.5f, -0.85f, -0.02f)); 
-    MDeco4b = rotate(MDeco4b, glm::radians(-76.0f), vec3(0.0f, 1.0f, 0.0f));
-    MDeco4b = scale(MDeco4b, vec3(0.017f));
     LightSaber->draw(P, V, MDeco4b);
-
-    mat4 MDeco5 = mat4(1.0f);
-    MDeco5 = translate(MDeco5, vec3( 0.85f,  0.8f, 0.0f));
-    MDeco5 = rotate(MDeco5, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
-    MDeco5 = scale(MDeco5, vec3(0.07f));
     Falcon->draw(P, V, MDeco5);
 
-    // movimiento automatico cada segundo
-    /*double tiempo_actual = glfwGetTime();
-    if (tiempo_actual - tiempo_anterior > 0.1) {
-        mover_ficha(fichas[0],1);  // mueve solo la ficha 0
-        tiempo_anterior = tiempo_actual;
-    }*/
-//SOMBRAS
     for (int i = 0; i < 4; i++) {
         int idx = fichas[i].casilla_actual;
         float ox, oy;
         get_offset_ficha(i, ox, oy);
-        float cx = grafo[idx].x + ox;
-        float cy = grafo[idx].y + oy;
-        dibujar_sombra_fake(prog, P, V, cx, cy, 0.025f, 0.015f);  // elipse pequeña
-    }
-    for (int i = 4; i < 8; i++) {   // TIE Interceptor — más ancho
-        int idx = fichas[i].casilla_actual;
-        float ox, oy;
-        get_offset_ficha(i, ox, oy);
-        dibujar_sombra_fake(prog, P, V, grafo[idx].x+ox, grafo[idx].y+oy, 0.05f, 0.02f);
-    }
-    for (int i = 8; i < 12; i++) {  // nave roja
-        int idx = fichas[i].casilla_actual;
-        float ox, oy;
-        get_offset_ficha(i, ox, oy);
-        dibujar_sombra_fake(prog, P, V, grafo[idx].x+ox, grafo[idx].y+oy, 0.03f, 0.015f);
-    }
-    for (int i = 12; i < 16; i++) { // Mask verde
-        int idx = fichas[i].casilla_actual;
-        float ox, oy;
-        get_offset_ficha(i, ox, oy);
-        dibujar_sombra_fake(prog, P, V, grafo[idx].x+ox, grafo[idx].y+oy, 0.02f, 0.012f);
-    }
-
-    // dibujar fichas en su casilla actual
-    for (int i = 0; i < 4; i++) { //AMARILLAS
-        int idx = fichas[i].casilla_actual;
-        float ox, oy;
-        get_offset_ficha(i, ox, oy);
         float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
-        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
-        M = translate(M, pos);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
         M = translate(M, vec3(-0.005f, -0.005f, 0.0f));
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
         M = rotate(M, glm::radians(-90.0f), vec3(0.0f, 1.0f, 0.0f));
         M = scale(M, vec3(0.025f));
         R2D2->draw(P, V, M);
     }
-    for (int i = 4; i < 8; i++) { //AZULES
+    for (int i = 4; i < 8; i++) {
         int idx = fichas[i].casilla_actual;
         float ox, oy;
         get_offset_ficha(i, ox, oy);
         float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
-        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
-        M = translate(M, pos);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
         M = rotate(M, glm::radians(90.0f), vec3(0.0f, 1.0f, 0.0f));
         M = scale(M, vec3(0.09f));
         TieInterceptor->draw(P, V, M);
     }
-    for (int i = 8; i < 12; i++) { //ROJAS
+    for (int i = 8; i < 12; i++) {
         int idx = fichas[i].casilla_actual;
         float ox, oy;
         get_offset_ficha(i, ox, oy);
         float z_ficha = (ficha_seleccionada == i) ? 0.15f : 0.05f;
-        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
-        M = translate(M, pos);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
         M = translate(M, vec3(0.0f, 0.04f, 0.0f));
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
         M = scale(M, vec3(0.03f));
         nave->draw(P, V, M);
     }
-    for (int i = 12; i < 16; i++) { //VERDES
+    for (int i = 12; i < 16; i++) {
         int idx = fichas[i].casilla_actual;
         float ox, oy;
         get_offset_ficha(i, ox, oy);
         float z_ficha = (ficha_seleccionada == i) ? 0.11f : 0.01f;
-        vec3 pos = vec3(grafo[idx].x + ox, grafo[idx].y + oy, z_ficha);
         mat4 M = mat4(1.0f);
-        M = translate(M, pos);
+        M = translate(M, vec3(grafo[idx].x+ox, grafo[idx].y+oy, z_ficha));
         M = rotate(M, glm::radians(90.0f), vec3(1.0f, 0.0f, 0.0f));
         M = rotate(M, glm::radians(-90.0f), vec3(0.0f, 1.0f, 0.0f));
         M = scale(M, vec3(0.012f));
         Mask->draw(P, V, M);
     }
-    
+
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
 }
 
 // ======================= MAIN =========================
@@ -1821,9 +1769,13 @@ static void KeyCallback(GLFWwindow* window, int key, int code, int action, int m
         ColorJugador color_turno = orden_turnos[turno_actual];
         bool alguna_fuera = false;
         for (int j = 0; j < 16; j++) {
-            if (fichas[j].color == color_turno && fichas[j].casilla_actual < 100 && !fichas[j].en_meta) {
-                alguna_fuera = true;
-                break;
+            if (fichas[j].color == color_turno && fichas[j].casilla_actual < 100) {
+                int ca = fichas[j].casilla_actual;
+                bool en_final = (ca == 75 || ca == 83 || ca == 91 || ca == 99);
+                if (!en_final) {
+                    alguna_fuera = true;
+                    break;
+                }
             }
         }
         if (!alguna_fuera && dado != 5) {
@@ -1909,8 +1861,7 @@ static void KeyCallback(GLFWwindow* window, int key, int code, int action, int m
 
         // ── COMER FICHAS ENEMIGAS ──────────────────────────────
         int casilla_destino = fichas[ficha_seleccionada].casilla_actual;
-        bool casilla_es_segura = (grafo[casilla_destino].tipo == SEGURO || 
-                                grafo[casilla_destino].tipo == SALIDA);
+        bool casilla_es_segura = (grafo[casilla_destino].tipo == SEGURO);
 
         if (!casilla_es_segura && casilla_destino < 68) {  // no come en meta
             for (int j = 0; j < 16; j++) {
@@ -1973,8 +1924,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         }
     }
 }
-
-
 
 void asigna_funciones_callback(GLFWwindow* window)
 {
